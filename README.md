@@ -4,12 +4,11 @@ An iOS chat application built with SwiftUI and CloudKit that enables conversatio
 
 ## Features
 
-- 💬 Real-time chat interface with AI assistant
+- 💬 Real-time chat interface with AI assistant that runs on a MacOS device remotely
 - ☁️ CloudKit integration for data synchronization
 - 📱 Push notification support
 - 🔄 Automatic message syncing across devices
 - 📝 Markdown support for assistant responses
-- 🎨 Modern SwiftUI interface
 - 📋 Copy message functionality
 - 🗂 Conversation management (create, delete, view history)
 
