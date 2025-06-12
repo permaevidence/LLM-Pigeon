@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Push notifications -->
+    <key>aps-environment</key>
+    <string>production</string> <!-- CHANGE THIS -->
+
+    <!-- CloudKit -->
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+        <string>iCloud.com.pigeonchat.pigeonchat</string>
+    </array>
+    <key>com.apple.developer.icloud-services</key>
+    <array>
+        <string>CloudKit</string>
+    </array>
+    <!-- REMOVE com.apple.developer.icloud-container-environment OR set to Production -->
+    <!-- For TestFlight/App Store, CloudKit AUTOMATICALLY uses Production. -->
+    <!-- Explicitly setting it can sometimes cause issues if not perfectly aligned -->
+    <!-- Apple's recommendation is often to remove it for release builds -->
+    <!-- If you keep it, it MUST be <string>Production</string> -->
+</dict>
+</plist>
