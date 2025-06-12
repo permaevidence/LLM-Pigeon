@@ -24,7 +24,7 @@ An iOS chat application built with SwiftUI and CloudKit that enables conversatio
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/pigeon-chat.git
+git clone https://github.com/permaevidence/LLM-Pigeon.git
 cd pigeon-chat
 ```
 
@@ -114,6 +114,6 @@ This project is available under the MIT License. See the LICENSE file for more i
 
 ## Contact
 
-Your Name - [@your_twitter](https://twitter.com/your_twitter)
+permaevidence@protonmail.com
 
-Project Link: [https://github.com/YOUR_USERNAME/pigeon-chat](https://github.com/YOUR_USERNAME/pigeon-chat)
+Project Link: [https://github.com/YOUR_USERNAME/pigeon-chat](https://github.com/permaevidence/LLM-Pigeon)
