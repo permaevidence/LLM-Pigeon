@@ -19,50 +19,52 @@ import Foundation
 import AVFoundation
 import WhisperKit
 import Network
+import Vision
+import VisionKit
+import PDFKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 // MARK: - Shared Models (Ensure these are identical to macOS app's models)
 struct Message: Identifiable, Codable {
-    let id: UUID // Changed from 'let id = UUID()' to ensure it's decoded if present
-    let role: String // "user" | "assistant"
+    let id: UUID
+    let role: String
     let content: String
     let timestamp: Date
+    let attachmentText: String? // NEW: Add this property
 
-    // Custom initializer for programmatic creation, ensuring an ID is always set
-    init(id: UUID = UUID(), role: String, content: String, timestamp: Date) {
+    // Update the initializer
+    init(id: UUID = UUID(), role: String, content: String, timestamp: Date, attachmentText: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
-        // Optional: print("[Message Programmatic Init] ID: \(self.id.uuidString.prefix(8))")
+        self.attachmentText = attachmentText
     }
 
-    // Explicit Codable conformance to be certain about id handling
+    // Update CodingKeys
     enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp
+        case id, role, content, timestamp, attachmentText
     }
 
-    // Decoder: If 'id' is missing in JSON, generate a new one.
-    // This was likely the behavior with 'let id = UUID()', making IDs unstable if not in JSON.
-    // By making 'id' non-optional and decoding it, we force it to be in the JSON.
+    // Update decoder
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Try to decode 'id'. If it's not in the JSON, this will fail, which is good
-        // because it means our JSONEncoder isn't saving it.
-        // If it IS in the JSON, it will be used.
         self.id = try container.decode(UUID.self, forKey: .id)
         self.role = try container.decode(String.self, forKey: .role)
         self.content = try container.decode(String.self, forKey: .content)
         self.timestamp = try container.decode(Date.self, forKey: .timestamp)
-        // Optional: print("[Message Decoded] ID: \(self.id.uuidString.prefix(8)) from JSON")
+        self.attachmentText = try container.decodeIfPresent(String.self, forKey: .attachmentText)
     }
 
-    // Encoder: Ensure 'id' is always encoded.
+    // Update encoder
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.id, forKey: .id)
         try container.encode(self.role, forKey: .role)
         try container.encode(self.content, forKey: .content)
         try container.encode(self.timestamp, forKey: .timestamp)
+        try container.encodeIfPresent(self.attachmentText, forKey: .attachmentText)
     }
 }
 
@@ -95,6 +97,42 @@ extension Message {
     }
 }
 
+enum ModelProvider: String, CaseIterable {
+    case builtIn = "Built-in"
+    case lmstudio = "LM Studio"
+    case ollama = "Ollama"
+    
+    var displayName: String { rawValue }
+}
+
+struct ModelOption: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let provider: ModelProvider
+    let requiresRAM: String? // For built-in models
+    
+    static let allOptions: [ModelOption] = [
+        // Built-in models
+        ModelOption(id: "qwen3-0.6b", displayName: "Qwen3 0.6B", provider: .builtIn, requiresRAM: "0.5 GB"),
+        ModelOption(id: "qwen3-4b", displayName: "Qwen3 4B", provider: .builtIn, requiresRAM: "2.5 GB"),
+        ModelOption(id: "qwen3-8b", displayName: "Qwen3 8B", provider: .builtIn, requiresRAM: "5 GB"),
+        ModelOption(id: "qwen3-14b", displayName: "Qwen3 14B", provider: .builtIn, requiresRAM: "9 GB"),
+        ModelOption(id: "qwen3-30b-a3b", displayName: "Qwen3 30B", provider: .builtIn, requiresRAM: "18 GB"),
+        ModelOption(id: "qwen3-32b", displayName: "Qwen3 32B", provider: .builtIn, requiresRAM: "20 GB"),
+        
+        // External providers
+        ModelOption(id: "lmstudio", displayName: "LM Studio", provider: .lmstudio, requiresRAM: nil),
+        ModelOption(id: "ollama", displayName: "Ollama", provider: .ollama, requiresRAM: nil)
+    ]
+    
+    var fullDisplayName: String {
+        if let ram = requiresRAM {
+            return "\(displayName) (\(ram))"
+        }
+        return displayName
+    }
+}
+
 enum DeviceSupport {
     static let isIPhone13OrNewer: Bool = {
         var systemInfo = utsname(); uname(&systemInfo)
@@ -124,21 +162,24 @@ final class CloudKitManager: NSObject, ObservableObject {
     
     // MARK: - Private initialization
     private override init() {
-            container  = CKContainer(identifier: Self.containerID)
-            privateDB  = container.privateCloudDatabase
-            super.init()
+        container  = CKContainer(identifier: Self.containerID)
+        privateDB  = container.privateCloudDatabase
+        super.init()
 
-            /* -------- 1.  Immediate, synchronous cache load  -------- */
-            preloadCache()                   // <= see below
+        /* -------- 1.  Immediate, synchronous cache load  -------- */
+        preloadCache()
 
-            /* -------- 2.  Now start the asynchronous work   -------- */
-            setupNetworkMonitoring()
-            Task {
-                await refreshAccountStatus()
-                await ensureSubscriptionExists()
-                await syncConversations()    // *network* + delta merge
-            }
+        /* ---- NEW: create a fresh, empty conversation right away ---- */
+        startNewConversation()          // ← this is the one-liner you add
+
+        /* -------- 2.  Now start the asynchronous work   -------- */
+        setupNetworkMonitoring()
+        Task {
+            await refreshAccountStatus()
+            await ensureSubscriptionExists()
+            await syncConversations()
         }
+    }
 
     // MARK: Public @Published state
     @Published var currentConversation: Conversation?
@@ -149,6 +190,67 @@ final class CloudKitManager: NSObject, ObservableObject {
     @Published var lastSync: Date?
     @Published var isOffline = false
     @Published var hasCachedData = false
+    @Published var isServerGenerating = false
+    @Published var serverGeneratingConversationId: String?
+    @Published var isStopRequestInProgress = false
+    
+    @AppStorage("enableWebSearch") var enableWebSearch: Bool = false
+    @AppStorage("selectedModelId") var selectedModelId: String = "qwen3-4b"
+    @AppStorage("builtInSystemPrompt") var builtInSystemPrompt: String = "/no_think"
+    @AppStorage("builtInContextValue") var builtInContextValue: Int = 16000
+    @AppStorage("builtInTemperatureValue") var builtInTemperatureValue: Double = 0.7
+    @AppStorage("builtInTopKValue") var builtInTopKValue: Int = 20
+    @AppStorage("builtInTopPValue") var builtInTopPValue: Double = 0.8
+    
+    // LMStudio parameters
+    @AppStorage("lmstudioSystemPrompt") var lmstudioSystemPrompt: String = ""
+    @AppStorage("lmstudioMaxTokensEnabled") var lmstudioMaxTokensEnabled: Bool = false
+    @AppStorage("lmstudioMaxTokensValue") var lmstudioMaxTokensValue: Int = 4096
+    @AppStorage("lmstudioTemperatureEnabled") var lmstudioTemperatureEnabled: Bool = false
+    @AppStorage("lmstudioTemperatureValue") var lmstudioTemperatureValue: Double = 0.7
+    @AppStorage("lmstudioTopPEnabled") var lmstudioTopPEnabled: Bool = false
+    @AppStorage("lmstudioTopPValue") var lmstudioTopPValue: Double = 0.9
+
+    // Ollama parameters
+    @AppStorage("ollamaSystemPrompt") var ollamaSystemPrompt: String = ""
+    @AppStorage("ollamaMaxTokensEnabled") var ollamaMaxTokensEnabled: Bool = false
+    @AppStorage("ollamaMaxTokensValue") var ollamaMaxTokensValue: Int = 4096
+    @AppStorage("ollamaTemperatureEnabled") var ollamaTemperatureEnabled: Bool = false
+    @AppStorage("ollamaTemperatureValue") var ollamaTemperatureValue: Double = 0.7
+    @AppStorage("ollamaTopPEnabled") var ollamaTopPEnabled: Bool = false
+    @AppStorage("ollamaTopPValue") var ollamaTopPValue: Double = 0.9
+    
+    // Add these after existing @AppStorage properties
+    @AppStorage("enableThinking") var enableThinking: Bool = false
+
+    // Thinking mode parameters (local storage only)
+    @AppStorage("thinkingSystemPrompt") var thinkingSystemPrompt: String = ""
+    @AppStorage("thinkingContextValue") var thinkingContextValue: Int = 16000
+    @AppStorage("thinkingTemperatureValue") var thinkingTemperatureValue: Double = 0.6
+    @AppStorage("thinkingTopKValue") var thinkingTopKValue: Int = 20
+    @AppStorage("thinkingTopPValue") var thinkingTopPValue: Double = 0.95
+    
+    // LMStudio thinking parameters
+    @AppStorage("lmstudioThinkingSystemPrompt") var lmstudioThinkingSystemPrompt: String = ""
+    @AppStorage("lmstudioThinkingMaxTokensEnabled") var lmstudioThinkingMaxTokensEnabled: Bool = false
+    @AppStorage("lmstudioThinkingMaxTokensValue") var lmstudioThinkingMaxTokensValue: Int = 4096
+    @AppStorage("lmstudioThinkingTemperatureEnabled") var lmstudioThinkingTemperatureEnabled: Bool = false
+    @AppStorage("lmstudioThinkingTemperatureValue") var lmstudioThinkingTemperatureValue: Double = 0.6
+    @AppStorage("lmstudioThinkingTopPEnabled") var lmstudioThinkingTopPEnabled: Bool = false
+    @AppStorage("lmstudioThinkingTopPValue") var lmstudioThinkingTopPValue: Double = 0.95
+    @AppStorage("lmstudioModelName") var lmstudioModelName: String = "add model in settings"
+    
+    // Ollama thinking parameters
+    @AppStorage("ollamaThinkingSystemPrompt") var ollamaThinkingSystemPrompt: String = ""
+    @AppStorage("ollamaThinkingMaxTokensEnabled") var ollamaThinkingMaxTokensEnabled: Bool = false
+    @AppStorage("ollamaThinkingMaxTokensValue") var ollamaThinkingMaxTokensValue: Int = 4096
+    @AppStorage("ollamaThinkingTemperatureEnabled") var ollamaThinkingTemperatureEnabled: Bool = false
+    @AppStorage("ollamaThinkingTemperatureValue") var ollamaThinkingTemperatureValue: Double = 0.6
+    @AppStorage("ollamaThinkingTopPEnabled") var ollamaThinkingTopPEnabled: Bool = false
+    @AppStorage("ollamaThinkingTopPValue") var ollamaThinkingTopPValue: Double = 0.95
+    @AppStorage("ollamaModelName") var ollamaModelName: String = "add model in settings"
+    
+    @AppStorage("transcriptionEnabled") var transcriptionEnabled: Bool = true
 
     // MARK: Private properties
     private static let containerID = "iCloud.com.pigeonchat.pigeonchat"
@@ -159,6 +261,38 @@ final class CloudKitManager: NSObject, ObservableObject {
     private var pollTask: Task<Void, Never>? = nil
     private var backOff: TimeInterval = 1.0
     private var networkMonitor: NWPathMonitor?
+    var selectedModel: ModelOption {
+            ModelOption.allOptions.first { $0.id == selectedModelId } ?? ModelOption.allOptions[1]
+        }
+    
+    var isThinkingAvailable: Bool {
+        switch selectedModel.provider {
+        case .builtIn:
+            return true // Always available for built-in
+        case .lmstudio:
+            // Check if any thinking parameter is configured
+            return !lmstudioThinkingSystemPrompt.isEmpty ||
+                   lmstudioThinkingMaxTokensEnabled ||
+                   lmstudioThinkingTemperatureEnabled ||
+                   lmstudioThinkingTopPEnabled
+        case .ollama:
+            // Check if any thinking parameter is configured
+            return !ollamaThinkingSystemPrompt.isEmpty ||
+                   ollamaThinkingMaxTokensEnabled ||
+                   ollamaThinkingTemperatureEnabled ||
+                   ollamaThinkingTopPEnabled
+        }
+    }
+    
+    var currentDisplayName: String {
+            displayName(for: selectedModel)
+        }
+    
+    var conversationSizePercentage: Double {
+        guard let conv = currentConversation else { return 0 }
+        let currentSize = calculateConversationSize(conv)
+        return Double(currentSize) / 800_000.0
+    }
 
     // MARK: - Network Monitoring
     private func setupNetworkMonitoring() {
@@ -180,16 +314,27 @@ final class CloudKitManager: NSObject, ObservableObject {
         networkMonitor?.start(queue: queue)
     }
     
-    private func preloadCache() {
-            let cached = LocalCacheManager.shared.loadAllConversations()
-
-            conversations       = cached
-            currentConversation = cached.first       // optional
-            hasCachedData       = !cached.isEmpty
-            lastSync            = LocalCacheManager.shared.loadMetadata().lastFullSync
-
-            print("[iOS] Pre‑loaded \(cached.count) conversations from cache")
+    @MainActor
+    private func ensureConversationExists() {
+        if currentConversation == nil && conversations.isEmpty {
+            print("[iOS] No conversations exist, creating new one automatically")
+            startNewConversation()
         }
+    }
+    
+    private func preloadCache() {
+        let cached = LocalCacheManager.shared.loadAllConversations()
+
+        conversations       = cached
+        currentConversation = cached.first
+        hasCachedData       = !cached.isEmpty
+        lastSync            = LocalCacheManager.shared.loadMetadata().lastFullSync
+
+        print("[iOS] Pre‑loaded \(cached.count) conversations from cache")
+        
+        // Add this line to ensure we have a conversation
+        ensureConversationExists()
+    }
 
     // MARK: - Notification Setup
     func setupNotifications() async {
@@ -285,9 +430,31 @@ final class CloudKitManager: NSObject, ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+    
+    private func pruneEmptyConversations() {
+        let doomed = conversations.filter {
+            $0.messages.isEmpty && $0.id != currentConversation?.id
+        }
+        guard !doomed.isEmpty else { return }
+
+        print("[iOS] Pruning \(doomed.count) empty conversations")
+
+        for conv in doomed {
+            // ① remove from local cache + in-memory list
+            LocalCacheManager.shared.deleteConversation(id: conv.id)
+            conversations.removeAll { $0.id == conv.id }
+
+            // ② remove from CloudKit (best-effort)
+            Task {
+                do { try await privateDB.deleteRecord(withID: CKRecord.ID(recordName: conv.id)) }
+                catch { print("[iOS] Cloud delete failed for \(conv.id.prefix(8)): \(error)") }
+            }
+        }
+    }
 
     // MARK: - Conversation CRUD with Caching
     func startNewConversation() {
+        pruneEmptyConversations()
         let convID = UUID().uuidString
         print("[iOS] Starting new conversation with ID: \(convID.prefix(8))")
         let conv = Conversation(id: convID, messages: [], lastUpdated: .now)
@@ -300,13 +467,41 @@ final class CloudKitManager: NSObject, ObservableObject {
         Task { await saveConversation(needsResponse: false) }
     }
 
-    func sendMessage(_ text: String) {
+    func sendMessage(_ text: String, attachmentText: String? = nil) {
         guard var conv = currentConversation else {
             print("[iOS] Error: sendMessage called with no currentConversation.")
             return
         }
         print("[iOS] Sending message in conversation \(conv.id.prefix(8))")
-        let userMsg = Message(role: "user", content: text, timestamp: .now)
+        
+        // Combine user text with attachment context if present
+        let fullContent: String
+        if let attachmentText = attachmentText {
+            fullContent = "\(text)\n\n[Attached content]:\n\(attachmentText)"
+        } else {
+            fullContent = text
+        }
+        
+        // Create the message to check size
+        let userMsg = Message(role: "user", content: fullContent, timestamp: .now, attachmentText: attachmentText)
+        
+        // Check if adding this message would exceed the size limit
+        let projectedSize = calculateConversationSize(conv, additionalMessage: userMsg)
+        let characterLimit = 800_000 // 800k characters as requested
+        
+        // Rough estimate: 1 character ≈ 1 byte for ASCII, up to 4 bytes for Unicode
+        // To be safe, we'll check both character count and actual byte size
+        let totalCharacters = conv.messages.reduce(0) { $0 + $1.content.count } + fullContent.count
+        
+        if projectedSize > characterLimit || totalCharacters > characterLimit {
+            // Show error and don't send
+            Task { @MainActor in
+                self.errorMessage = "Message too large. This conversation is approaching the size limit. Please start a new conversation."
+            }
+            return
+        }
+        
+        // If size check passes, proceed with sending
         conv.messages.append(userMsg)
         conv.lastUpdated = .now
         currentConversation = conv
@@ -322,6 +517,12 @@ final class CloudKitManager: NSObject, ObservableObject {
 
     func selectConversation(_ conv: Conversation) {
         print("[iOS] Selecting conversation \(conv.id.prefix(8))")
+        
+        // Clear any stuck generating state when switching conversations
+        if serverGeneratingConversationId != nil && serverGeneratingConversationId != conv.id {
+            clearGeneratingState()
+        }
+        
         currentConversation = conv
         Task { await fetchConversation(id: conv.id) }
     }
@@ -335,7 +536,12 @@ final class CloudKitManager: NSObject, ObservableObject {
         // Remove from UI
         conversations.removeAll { $0.id == conv.id }
         if currentConversation?.id == conv.id {
-            currentConversation = conversations.first
+            if conversations.isEmpty {
+                // If this was the last conversation, create a new one
+                startNewConversation()
+            } else {
+                currentConversation = conversations.first
+            }
         }
         
         // Remove from CloudKit
@@ -452,20 +658,80 @@ final class CloudKitManager: NSObject, ObservableObject {
             
             // If the current conversation was deleted or never set, default to the most recent one.
             if currentConversation == nil || !conversations.contains(where: { $0.id == currentConversation?.id }) {
-                currentConversation = conversations.first
-            }
-            
-            lastSync = .now
-            LocalCacheManager.shared.updateLastFullSync()
-            hasCachedData = !conversations.isEmpty
-            print("[iOS] Sync complete. Total conversations now: \(conversations.count)")
-
-        } catch {
+                    if conversations.isEmpty {
+                        // No conversations at all, create a new one
+                        ensureConversationExists()
+                    } else {
+                        // We have conversations, just select the first one
+                        currentConversation = conversations.first
+                    }
+                }
+                
+                lastSync = .now
+                LocalCacheManager.shared.updateLastFullSync()
+                pruneEmptyConversations()
+                hasCachedData = !conversations.isEmpty
+                print("[iOS] Sync complete. Total conversations now: \(conversations.count)")
+            } catch {
             print("[iOS] Major error during sync: \(error.localizedDescription)")
             errorMessage = "Sync failed: \(error.localizedDescription)"
         }
     }
 
+    func requestStopGeneration() {
+        guard let convId = serverGeneratingConversationId else { return }
+        guard !isStopRequestInProgress else {
+            print("[iOS] Stop request already in progress, ignoring additional press")
+            return
+        }
+        
+        print("[iOS] Requesting server to stop generation for \(convId.prefix(8))")
+        isStopRequestInProgress = true
+        
+        Task {
+            do {
+                let recordID = CKRecord.ID(recordName: convId)
+                let record = try await privateDB.record(for: recordID)
+                
+                // Check if stop was already requested
+                if let stopRequested = record["stopRequested"] as? NSNumber, stopRequested.boolValue == true {
+                    print("[iOS] Stop already requested, skipping duplicate")
+                    await MainActor.run {
+                        self.isStopRequestInProgress = false
+                    }
+                    return
+                }
+                
+                record["stopRequested"] = 1 as CKRecordValue
+                _ = try await privateDB.save(record)
+                print("[iOS] Stop request sent to server for \(convId.prefix(8))")
+                
+                // Keep the flag set until we see the server has stopped
+                // It will be cleared when fetchConversation sees isGenerating = false
+                
+                // Start polling more aggressively to catch the state change
+                if pollTask == nil {
+                    startPolling()
+                }
+            } catch {
+                print("[iOS] Error sending stop request: \(error)")
+                await MainActor.run {
+                    self.errorMessage = "Failed to send stop request. Please try again."
+                    self.isStopRequestInProgress = false
+                }
+            }
+        }
+    }
+
+    // Update the clearGeneratingState method to also clear the stop request flag:
+    func clearGeneratingState() {
+        isServerGenerating = false
+        serverGeneratingConversationId = nil
+        isStopRequestInProgress = false
+        print("[iOS] Manually cleared generating state")
+    }
+
+    // Update fetchConversation to clear the stop request flag when generation stops:
     private func fetchConversation(id: String) async {
         print("[iOS] Fetching conversation \(id.prefix(8))...")
         
@@ -486,6 +752,25 @@ final class CloudKitManager: NSObject, ObservableObject {
         do {
             let recordID = CKRecord.ID(recordName: id)
             let serverRecord = try await privateDB.record(for: recordID)
+            
+            // Check if server is generating - ALWAYS update the state based on server
+            let isGenerating = (serverRecord["isGenerating"] as? NSNumber)?.boolValue ?? false
+            
+            await MainActor.run {
+                if isGenerating && currentConversation?.id == id {
+                    self.isServerGenerating = true
+                    self.serverGeneratingConversationId = id
+                    print("[iOS] Server is generating response for \(id.prefix(8))")
+                } else {
+                    // Always clear if not generating or different conversation
+                    if self.serverGeneratingConversationId == id || self.currentConversation?.id == id {
+                        self.isServerGenerating = false
+                        self.serverGeneratingConversationId = nil
+                        self.isStopRequestInProgress = false // Clear this too
+                        print("[iOS] Server not generating for \(id.prefix(8)) - clearing state")
+                    }
+                }
+            }
             
             guard let data = serverRecord["conversationData"] as? Data,
                   let fetchedConvData = try? JSONDecoder().decode(Conversation.self, from: data) else {
@@ -535,10 +820,19 @@ final class CloudKitManager: NSObject, ObservableObject {
                 upsertLocally(conversationToUpdate)
             }
 
-            // Handle waiting state
+            // Handle waiting state - check for "Response interrupted" message
             if let lastMessage = self.currentConversation?.messages.last, self.currentConversation?.id == id {
                 if lastMessage.role == "assistant" {
                     stopPolling()
+                    // Clear server generating state if we see an assistant message
+                    if lastMessage.content == "Response interrupted" && (isServerGenerating || isStopRequestInProgress) {
+                        await MainActor.run {
+                            self.isServerGenerating = false
+                            self.serverGeneratingConversationId = nil
+                            self.isStopRequestInProgress = false
+                            print("[iOS] Detected interrupted response - clearing all states")
+                        }
+                    }
                 } else if lastMessage.role == "user" {
                     if !isWaitingForResponse { isWaitingForResponse = true }
                     if pollTask == nil && isWaitingForResponse { startPolling() }
@@ -564,6 +858,24 @@ final class CloudKitManager: NSObject, ObservableObject {
             // Keep using cached version on error
         }
     }
+    
+    
+    private func calculateConversationSize(_ conversation: Conversation, additionalMessage: Message? = nil) -> Int {
+        var tempConversation = conversation
+        if let additionalMessage = additionalMessage {
+            tempConversation.messages.append(additionalMessage)
+        }
+        
+        do {
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(tempConversation)
+            return data.count
+        } catch {
+            // If encoding fails, return a large number to prevent sending
+            return Int.max
+        }
+    }
+    
 
     private func saveConversation(needsResponse: Bool) async {
         guard let conv = currentConversation else {
@@ -600,9 +912,78 @@ final class CloudKitManager: NSObject, ObservableObject {
             recordToSave["conversationData"] = data as CKRecordValue
             recordToSave["lastUpdated"] = conv.lastUpdated as CKRecordValue
             recordToSave["needsResponse"] = (needsResponse ? 1 : 0) as CKRecordValue
+            
+            // Save web search preference
+            recordToSave["enableWebSearch"] = (enableWebSearch ? 1 : 0) as CKRecordValue
+            
+            // Save model selection
+            recordToSave["selectedModelId"] = selectedModelId as CKRecordValue
+            recordToSave["selectedProvider"] = selectedModel.provider.rawValue as CKRecordValue
+            
+            recordToSave["lmstudioModelName"] = lmstudioModelName as CKRecordValue
+            recordToSave["ollamaModelName"] = ollamaModelName as CKRecordValue
+            
+            // Save built-in model settings - USE THINKING PARAMETERS IF THINKING IS ENABLED
+            if selectedModel.provider == .builtIn && enableThinking {
+                // When thinking is enabled, save thinking parameters to the standard fields
+                recordToSave["builtInSystemPrompt"] = thinkingSystemPrompt as CKRecordValue
+                recordToSave["builtInContextValue"] = thinkingContextValue as CKRecordValue
+                recordToSave["builtInTemperatureValue"] = thinkingTemperatureValue as CKRecordValue
+                recordToSave["builtInTopKValue"] = thinkingTopKValue as CKRecordValue
+                recordToSave["builtInTopPValue"] = thinkingTopPValue as CKRecordValue
+            } else {
+                // Otherwise save regular parameters
+                recordToSave["builtInSystemPrompt"] = builtInSystemPrompt as CKRecordValue
+                recordToSave["builtInContextValue"] = builtInContextValue as CKRecordValue
+                recordToSave["builtInTemperatureValue"] = builtInTemperatureValue as CKRecordValue
+                recordToSave["builtInTopKValue"] = builtInTopKValue as CKRecordValue
+                recordToSave["builtInTopPValue"] = builtInTopPValue as CKRecordValue
+            }
+            
+            // Save LMStudio settings - USE THINKING PARAMETERS IF THINKING IS ENABLED
+            if selectedModel.provider == .lmstudio && enableThinking {
+                // When thinking is enabled for LMStudio, save thinking parameters
+                recordToSave["lmstudioSystemPrompt"] = lmstudioThinkingSystemPrompt as CKRecordValue
+                recordToSave["lmstudioMaxTokensEnabled"] = (lmstudioThinkingMaxTokensEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioMaxTokensValue"] = lmstudioThinkingMaxTokensValue as CKRecordValue
+                recordToSave["lmstudioTemperatureEnabled"] = (lmstudioThinkingTemperatureEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioTemperatureValue"] = lmstudioThinkingTemperatureValue as CKRecordValue
+                recordToSave["lmstudioTopPEnabled"] = (lmstudioThinkingTopPEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioTopPValue"] = lmstudioThinkingTopPValue as CKRecordValue
+            } else {
+                // Otherwise save regular LMStudio parameters
+                recordToSave["lmstudioSystemPrompt"] = lmstudioSystemPrompt as CKRecordValue
+                recordToSave["lmstudioMaxTokensEnabled"] = (lmstudioMaxTokensEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioMaxTokensValue"] = lmstudioMaxTokensValue as CKRecordValue
+                recordToSave["lmstudioTemperatureEnabled"] = (lmstudioTemperatureEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioTemperatureValue"] = lmstudioTemperatureValue as CKRecordValue
+                recordToSave["lmstudioTopPEnabled"] = (lmstudioTopPEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["lmstudioTopPValue"] = lmstudioTopPValue as CKRecordValue
+            }
+
+            // Save Ollama settings - USE THINKING PARAMETERS IF THINKING IS ENABLED
+            if selectedModel.provider == .ollama && enableThinking {
+                // When thinking is enabled for Ollama, save thinking parameters
+                recordToSave["ollamaSystemPrompt"] = ollamaThinkingSystemPrompt as CKRecordValue
+                recordToSave["ollamaMaxTokensEnabled"] = (ollamaThinkingMaxTokensEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaMaxTokensValue"] = ollamaThinkingMaxTokensValue as CKRecordValue
+                recordToSave["ollamaTemperatureEnabled"] = (ollamaThinkingTemperatureEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaTemperatureValue"] = ollamaThinkingTemperatureValue as CKRecordValue
+                recordToSave["ollamaTopPEnabled"] = (ollamaThinkingTopPEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaTopPValue"] = ollamaThinkingTopPValue as CKRecordValue
+            } else {
+                // Otherwise save regular Ollama parameters
+                recordToSave["ollamaSystemPrompt"] = ollamaSystemPrompt as CKRecordValue
+                recordToSave["ollamaMaxTokensEnabled"] = (ollamaMaxTokensEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaMaxTokensValue"] = ollamaMaxTokensValue as CKRecordValue
+                recordToSave["ollamaTemperatureEnabled"] = (ollamaTemperatureEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaTemperatureValue"] = ollamaTemperatureValue as CKRecordValue
+                recordToSave["ollamaTopPEnabled"] = (ollamaTopPEnabled ? 1 : 0) as CKRecordValue
+                recordToSave["ollamaTopPValue"] = ollamaTopPValue as CKRecordValue
+            }
 
             let savedRecord = try await privateDB.save(recordToSave)
-            print("[iOS] Successfully saved to CloudKit.")
+            print("[iOS] Successfully saved to CloudKit with model: \(selectedModel.displayName), thinking: \(enableThinking)")
             
             // Update cache with server's change tag
             try? LocalCacheManager.shared.saveConversation(
@@ -617,6 +998,17 @@ final class CloudKitManager: NSObject, ObservableObject {
             errorMessage = "Save Error: \(error.localizedDescription)"
         }
     }
+    
+    func displayName(for option: ModelOption) -> String {
+            switch option.provider {
+            case .lmstudio:
+                return lmstudioModelName.isEmpty ? option.displayName : lmstudioModelName
+            case .ollama:
+                return ollamaModelName.isEmpty ? option.displayName : ollamaModelName
+            case .builtIn:
+                return option.displayName
+            }
+        }
 
     private func upsertLocally(_ conv: Conversation) {
         if let idx = conversations.firstIndex(where: { $0.id == conv.id }) {
@@ -743,6 +1135,1024 @@ extension CloudKitManager: UNUserNotificationCenterDelegate {
         handleRemoteNotification(userInfo)
     }
 }
+
+
+@MainActor
+final class AttachmentManager: ObservableObject {
+    @Published var attachments: [Attachment] = []
+    @Published var isProcessing = false
+    @Published var errorMessage: String?
+    
+    struct Attachment: Identifiable {
+        let id = UUID()
+        let fileName: String
+        let extractedText: String
+        let type: AttachmentType
+        
+        enum AttachmentType {
+            case image, pdf
+        }
+    }
+    
+    var hasAttachments: Bool {
+        !attachments.isEmpty
+    }
+    
+    var combinedAttachmentText: String? {
+        guard !attachments.isEmpty else { return nil }
+        
+        return attachments.enumerated().map { index, attachment in
+            "[Attachment \(index + 1): \(attachment.fileName)]\n\(attachment.extractedText)"
+        }.joined(separator: "\n\n")
+    }
+    
+    func clearAllAttachments() {
+        attachments.removeAll()
+        errorMessage = nil
+    }
+    
+    func removeAttachment(id: UUID) {
+        attachments.removeAll { $0.id == id }
+    }
+    
+    func processImage(_ image: UIImage, fileName: String = "Image") async {
+        await MainActor.run {
+            isProcessing = true
+            errorMessage = nil
+        }
+        
+        guard let cgImage = image.cgImage else {
+            await MainActor.run {
+                errorMessage = "Failed to process image"
+                isProcessing = false
+            }
+            return
+        }
+        
+        let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let request = VNRecognizeTextRequest { [weak self] request, error in
+            guard let observations = request.results as? [VNRecognizedTextObservation],
+                  error == nil else {
+                Task { @MainActor in
+                    self?.errorMessage = "Failed to extract text from image"
+                    self?.isProcessing = false
+                }
+                return
+            }
+            
+            let extractedText = observations
+                .compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: "\n")
+            
+            Task { @MainActor in
+                if !extractedText.isEmpty {
+                    self?.attachments.append(Attachment(
+                        fileName: fileName,
+                        extractedText: extractedText,
+                        type: .image
+                    ))
+                }
+                self?.isProcessing = false
+            }
+        }
+        
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        
+        do {
+            try requestHandler.perform([request])
+        } catch {
+            await MainActor.run {
+                errorMessage = "OCR failed: \(error.localizedDescription)"
+                isProcessing = false
+            }
+        }
+    }
+    
+    func processPDF(at url: URL, fileName: String) async {
+        await MainActor.run {
+            isProcessing = true
+            errorMessage = nil
+        }
+        
+        // Clean up temporary file when done
+        defer {
+            if url.path.contains(NSTemporaryDirectory()) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        
+        guard let document = PDFDocument(url: url) else {
+            await MainActor.run {
+                errorMessage = "Failed to load PDF"
+                isProcessing = false
+            }
+            return
+        }
+        
+        var fullText = ""
+        
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            
+            if let pageText = page.string {
+                fullText += pageText + "\n\n"
+            }
+        }
+        
+        await MainActor.run {
+            if !fullText.isEmpty {
+                attachments.append(Attachment(
+                    fileName: fileName,
+                    extractedText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
+                    type: .pdf
+                ))
+            }
+            isProcessing = false
+        }
+    }
+}
+
+
+struct ModelSelectorView: View {
+    @EnvironmentObject private var cloud: CloudKitManager
+
+    /// (Optional) keep provider grouping for a tidy menu
+    private var grouped: [(provider: ModelProvider, models: [ModelOption])] {
+        Dictionary(grouping: ModelOption.allOptions, by: \.provider)
+            .sorted { $0.key.rawValue < $1.key.rawValue }
+            .map { ($0.key, $0.value) }
+    }
+
+    var body: some View {
+            Menu {
+                ForEach(grouped, id: \.provider) { group in
+                    Text(group.provider.displayName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .disabled(true)
+
+                    ForEach(group.models) { option in
+                        Button {
+                            cloud.selectedModelId = option.id
+                        } label: {
+                            Label(
+                                cloud.displayName(for: option),   // ← uses helper
+                                systemImage: cloud.selectedModelId == option.id ? "checkmark" : ""
+                            )
+                        }
+                    }
+
+                    if group.provider != grouped.last?.provider { Divider() }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(cloud.currentDisplayName)              // ← uses helper
+                        .font(.system(size: 16, weight: .medium))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12))
+                }
+                .foregroundColor(.primary)
+            }
+            .menuStyle(.automatic)
+        }
+    }
+
+
+struct SettingsView: View {
+    @EnvironmentObject private var cloud: CloudKitManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingDeleteAllAlert = false
+    @State private var showingResetAlert = false
+    @State private var contextLengthText = ""
+    @State private var topKText = ""
+    
+    // Thinking mode text fields
+    @State private var thinkingContextLengthText = ""
+    @State private var thinkingTopKText = ""
+    
+    // Toggle for showing thinking parameters
+    @State private var showThinkingParameters = false
+    
+    // LMStudio text fields
+    @State private var lmstudioMaxTokensText = ""
+    
+    // Ollama text fields
+    @State private var ollamaMaxTokensText = ""
+    
+    // LMStudio thinking text fields
+    @State private var lmstudioThinkingMaxTokensText = ""
+    @State private var showLMStudioThinkingParameters = false
+
+    // Ollama thinking text fields
+    @State private var ollamaThinkingMaxTokensText = ""
+    @State private var showOllamaThinkingParameters = false
+    
+    @State private var builtInExpanded   = false   // collapsed by default
+    @State private var lmStudioExpanded  = false
+    @State private var ollamaExpanded    = false
+    
+    @State private var builtInMode          : ParamMode = .regular
+    @State private var lmStudioMode         : ParamMode = .regular
+    @State private var ollamaMode           : ParamMode = .regular
+    
+    // Focus state for keyboard management
+    @FocusState private var focusedField: Field?
+    
+    enum Field: Hashable {
+        case systemPrompt
+        case thinkingSystemPrompt
+        case contextLength
+        case topK
+        case thinkingContextLength
+        case thinkingTopK
+        case lmstudioModelName
+        case lmstudioSystemPrompt
+        case lmstudioMaxTokens
+        case lmstudioThinkingSystemPrompt
+        case lmstudioThinkingMaxTokens
+        case ollamaModelName
+        case ollamaSystemPrompt
+        case ollamaMaxTokens
+        case ollamaThinkingSystemPrompt
+        case ollamaThinkingMaxTokens
+    }
+    
+    enum ParamMode: String, CaseIterable, Identifiable {
+        case regular  = "Regular"
+        case thinking = "Thinking"
+        
+        var id: Self { self }
+    }
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                // Built-in Model Settings Section
+                DisclosureGroup(
+                    isExpanded: $builtInExpanded,
+                    content: {
+                        modePicker(selection: $builtInMode)
+                            .padding(.bottom, 4)
+
+                        if builtInMode == .thinking {
+                            thinkingModelSettingsContent()
+                        } else {
+                            modelSettingsContent(for: .builtIn)
+                        }
+                    },
+                    label: {
+                        Label("Built-in Model Settings", systemImage: "cpu")
+                            .font(.headline)
+                            .labelStyle(.titleOnly)
+                    }
+                )
+                
+                
+                // LM Studio Settings Section
+                DisclosureGroup(
+                    isExpanded: $lmStudioExpanded,
+                    content: {
+                        // Model Name - FIRST (above everything)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Model Name")
+                                .bold()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            TextField("e.g., local-model", text: $cloud.lmstudioModelName)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .lmstudioModelName)
+                                .submitLabel(.done)
+                        }
+                        .padding(.bottom, 8)
+                        
+                        // Regular ↔︎ Thinking switch - SECOND
+                        modePicker(selection: $lmStudioMode)
+                            .padding(.bottom, 4)
+
+                        // Show the appropriate sub-view - THIRD
+                        if lmStudioMode == .thinking {
+                            lmstudioThinkingSettingsContent()
+                        } else {
+                            modelSettingsContent(for: .lmstudio)
+                        }
+                    },
+                    label: {
+                        Label("LM Studio Settings", systemImage: "externaldrive")
+                            .font(.headline)
+                            .labelStyle(.titleOnly)
+                    }
+                )
+                
+                
+                // Ollama Settings Section
+                DisclosureGroup(
+                    isExpanded: $ollamaExpanded,
+                    content: {
+                        // Model Name - FIRST (above everything)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Model Name")
+                                .bold()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            TextField("e.g., llama3", text: $cloud.ollamaModelName)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .ollamaModelName)
+                                .submitLabel(.done)
+                        }
+                        .padding(.bottom, 8)
+                        
+                        // Regular ↔︎ Thinking switch - SECOND
+                        modePicker(selection: $ollamaMode)
+                            .padding(.bottom, 4)
+
+                        // Show the appropriate sub-view - THIRD
+                        if ollamaMode == .thinking {
+                            ollamaThinkingSettingsContent()
+                        } else {
+                            modelSettingsContent(for: .ollama)
+                        }
+                    },
+                    label: {
+                        Label("Ollama Settings", systemImage: "square.stack.3d.up")
+                            .font(.headline)
+                            .labelStyle(.titleOnly)
+                    }
+                )
+                
+                // Transcription Settings Section
+                Section {
+                    Toggle("Voice Transcription", isOn: $cloud.transcriptionEnabled)
+                } header: {
+                    Text("Voice Input")
+                } footer: {
+                    Text("When disabled, voice transcription features will be hidden and no model downloads will be prompted.")
+                        .font(.caption)
+                }
+                
+                // Delete All Conversations Section
+                Section {
+                    Button {
+                        showingDeleteAllAlert = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                                .foregroundColor(.red)
+                            Text("Delete All Conversations")
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+                // Keyboard toolbar
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        focusedField = nil
+                    }
+                }
+            }
+            .onDisappear {
+                validateAllFields()
+            }
+        }
+        .alert("Delete All Conversations?", isPresented: $showingDeleteAllAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete All", role: .destructive) {
+                deleteAllConversations()
+            }
+        } message: {
+            Text("This will permanently delete all conversations. This action cannot be undone.")
+        }
+        .alert("Reset to Default Settings?", isPresented: $showingResetAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                resetToDefaults()
+            }
+        } message: {
+            Text("This will reset all model parameters to their default values.")
+        }
+    }
+    
+    @ViewBuilder
+    private func modePicker(selection: Binding<ParamMode>) -> some View {
+        Picker("", selection: selection) {
+            ForEach(ParamMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)        // gives the clean text-only look
+    }
+    
+    @ViewBuilder
+    private func thinkingModelSettingsContent() -> some View {
+        // System Prompt
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Thinking System Prompt")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TextField("System prompt for thinking mode", text: $cloud.thinkingSystemPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...10)
+                .focused($focusedField, equals: .thinkingSystemPrompt)
+                .submitLabel(.done)
+        }
+        
+        // Context Length
+        HStack {
+            Text("Context Length")
+                .bold()
+                .frame(width: 120, alignment: .leading)
+            TextField("Context", text: $thinkingContextLengthText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 100)
+                .keyboardType(.numberPad)
+                .focused($focusedField, equals: .thinkingContextLength)
+                .onAppear {
+                    thinkingContextLengthText = String(cloud.thinkingContextValue)
+                }
+                .onChange(of: thinkingContextLengthText) { _, newValue in
+                    if let value = Int(newValue), value >= 256, value <= 128000 {
+                        cloud.thinkingContextValue = value
+                    }
+                }
+                .onSubmit {
+                    validateThinkingContextLength()
+                }
+            Text("tokens")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        
+        // Temperature
+        VStack(alignment: .leading) {
+            HStack {
+                Text("Temperature")
+                    .bold()
+                    .frame(width: 120, alignment: .leading)
+                Text(String(format: "%.2f", cloud.thinkingTemperatureValue))
+                    .frame(width: 50, alignment: .trailing)
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $cloud.thinkingTemperatureValue, in: 0...2, step: 0.05)
+        }
+        
+        // Top-K
+        HStack {
+            Text("Top-K")
+                .bold()
+                .frame(width: 120, alignment: .leading)
+            TextField("Top-K", text: $thinkingTopKText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 100)
+                .keyboardType(.numberPad)
+                .focused($focusedField, equals: .thinkingTopK)
+                .onAppear {
+                    thinkingTopKText = String(cloud.thinkingTopKValue)
+                }
+                .onChange(of: thinkingTopKText) { _, newValue in
+                    if let value = Int(newValue), value >= 1, value <= 200 {
+                        cloud.thinkingTopKValue = value
+                    }
+                }
+                .onSubmit {
+                    validateThinkingTopK()
+                }
+        }
+        
+        // Top-P
+        VStack(alignment: .leading) {
+            HStack {
+                Text("Top-P")
+                    .bold()
+                    .frame(width: 120, alignment: .leading)
+                Text(String(format: "%.2f", cloud.thinkingTopPValue))
+                    .frame(width: 50, alignment: .trailing)
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $cloud.thinkingTopPValue, in: 0...1, step: 0.01)
+        }
+        
+        // Reset to Defaults Button
+        Button {
+            resetThinkingToDefaults()
+        } label: {
+            HStack {
+                Image(systemName: "arrow.counterclockwise")
+                    .foregroundColor(.purple)
+                Text("Reset Thinking Parameters to Defaults")
+                    .foregroundColor(.purple)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func modelSettingsContent(for provider: ModelProvider) -> some View {
+        switch provider {
+        case .builtIn:
+            // System Prompt
+            VStack(alignment: .leading, spacing: 8) {
+                Text("System Prompt")
+                    .bold()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                TextField("System prompt", text: $cloud.builtInSystemPrompt, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...10)
+                    .focused($focusedField, equals: .systemPrompt)
+                    .submitLabel(.done)
+            }
+            
+            // Context Length
+            HStack {
+                Text("Context Length")
+                    .bold()
+                    .frame(width: 120, alignment: .leading)
+                TextField("Context", text: $contextLengthText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .contextLength)
+                    .onAppear {
+                        contextLengthText = String(cloud.builtInContextValue)
+                    }
+                    .onChange(of: contextLengthText) { _, newValue in
+                        if let value = Int(newValue), value >= 256, value <= 128000 {
+                            cloud.builtInContextValue = value
+                        }
+                    }
+                    .onSubmit {
+                        validateContextLength()
+                    }
+                Text("tokens")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            // Temperature
+            VStack(alignment: .leading) {
+                HStack {
+                    Text("Temperature")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.builtInTemperatureValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.builtInTemperatureValue, in: 0...2, step: 0.05)
+            }
+            
+            // Top-K
+            HStack {
+                Text("Top-K")
+                    .bold()
+                    .frame(width: 120, alignment: .leading)
+                TextField("Top-K", text: $topKText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .topK)
+                    .onAppear {
+                        topKText = String(cloud.builtInTopKValue)
+                    }
+                    .onChange(of: topKText) { _, newValue in
+                        if let value = Int(newValue), value >= 1, value <= 200 {
+                            cloud.builtInTopKValue = value
+                        }
+                    }
+                    .onSubmit {
+                        validateTopK()
+                    }
+            }
+            
+            // Top-P
+            VStack(alignment: .leading) {
+                HStack {
+                    Text("Top-P")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.builtInTopPValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.builtInTopPValue, in: 0...1, step: 0.01)
+            }
+            
+            // Reset to Defaults Button
+            Button {
+                showingResetAlert = true
+            } label: {
+                HStack {
+                    Image(systemName: "arrow.counterclockwise")
+                        .foregroundColor(.blue)
+                    Text("Reset to Defaults")
+                        .foregroundColor(.blue)
+                }
+            }
+            
+        case .lmstudio:
+            // System Prompt
+            VStack(alignment: .leading, spacing: 8) {
+                Text("System Prompt (optional)")
+                    .bold()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                TextField("Leave empty to use LM Studio's default", text: $cloud.lmstudioSystemPrompt, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...10)
+                    .focused($focusedField, equals: .lmstudioSystemPrompt)
+                    .submitLabel(.done)
+            }
+            
+            // Max Tokens
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Max Tokens", isOn: $cloud.lmstudioMaxTokensEnabled)
+                if cloud.lmstudioMaxTokensEnabled {
+                    HStack {
+                        Text("Max Tokens")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Max tokens", text: $lmstudioMaxTokensText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                            .keyboardType(.numberPad)
+                            .focused($focusedField, equals: .lmstudioMaxTokens)
+                            .onAppear {
+                                lmstudioMaxTokensText = String(cloud.lmstudioMaxTokensValue)
+                            }
+                            .onChange(of: lmstudioMaxTokensText) { _, newValue in
+                                if let value = Int(newValue), value >= 1 {
+                                    cloud.lmstudioMaxTokensValue = value
+                                }
+                            }
+                    }
+                }
+            }
+            
+            // Temperature
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Temperature", isOn: $cloud.lmstudioTemperatureEnabled)
+                if cloud.lmstudioTemperatureEnabled {
+                    HStack {
+                        Text("Temperature")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        Text(String(format: "%.2f", cloud.lmstudioTemperatureValue))
+                            .frame(width: 50, alignment: .trailing)
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $cloud.lmstudioTemperatureValue, in: 0...2, step: 0.05)
+                }
+            }
+            
+            // Top-P
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Top-P", isOn: $cloud.lmstudioTopPEnabled)
+                if cloud.lmstudioTopPEnabled {
+                    HStack {
+                        Text("Top-P")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        Text(String(format: "%.2f", cloud.lmstudioTopPValue))
+                            .frame(width: 50, alignment: .trailing)
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $cloud.lmstudioTopPValue, in: 0...1, step: 0.01)
+                }
+            }
+            
+            Text("Note: Only enabled parameters will override LM Studio's")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+        case .ollama:
+            // System Prompt
+            VStack(alignment: .leading, spacing: 8) {
+                Text("System Prompt (optional)")
+                    .bold()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                TextField("Leave empty to use Ollama's default", text: $cloud.ollamaSystemPrompt, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...10)
+                    .focused($focusedField, equals: .ollamaSystemPrompt)
+                    .submitLabel(.done)
+            }
+            
+            // Max Tokens
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Max Tokens", isOn: $cloud.ollamaMaxTokensEnabled)
+                if cloud.ollamaMaxTokensEnabled {
+                    HStack {
+                        Text("Max Tokens")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Max tokens", text: $ollamaMaxTokensText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                            .keyboardType(.numberPad)
+                            .focused($focusedField, equals: .ollamaMaxTokens)
+                            .onAppear {
+                                ollamaMaxTokensText = String(cloud.ollamaMaxTokensValue)
+                            }
+                            .onChange(of: ollamaMaxTokensText) { _, newValue in
+                                if let value = Int(newValue), value >= 1 {
+                                    cloud.ollamaMaxTokensValue = value
+                                }
+                            }
+                    }
+                }
+            }
+            
+            // Temperature
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Temperature", isOn: $cloud.ollamaTemperatureEnabled)
+                if cloud.ollamaTemperatureEnabled {
+                    HStack {
+                        Text("Temperature")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        Text(String(format: "%.2f", cloud.ollamaTemperatureValue))
+                            .frame(width: 50, alignment: .trailing)
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $cloud.ollamaTemperatureValue, in: 0...2, step: 0.05)
+                }
+            }
+            
+            // Top-P
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Override Top-P", isOn: $cloud.ollamaTopPEnabled)
+                if cloud.ollamaTopPEnabled {
+                    HStack {
+                        Text("Top-P")
+                            .bold()
+                            .frame(width: 120, alignment: .leading)
+                        Text(String(format: "%.2f", cloud.ollamaTopPValue))
+                            .frame(width: 50, alignment: .trailing)
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $cloud.ollamaTopPValue, in: 0...1, step: 0.01)
+                }
+            }
+            
+            Text("Note: Only enabled parameters will override Ollama's")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    @ViewBuilder
+    private func lmstudioThinkingSettingsContent() -> some View {
+        // System Prompt
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Thinking System Prompt (optional)")
+                .bold()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TextField("Leave empty to use LM Studio's default", text: $cloud.lmstudioThinkingSystemPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...10)
+                .focused($focusedField, equals: .lmstudioThinkingSystemPrompt)
+                .submitLabel(.done)
+        }
+        
+        // Max Tokens
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Max Tokens", isOn: $cloud.lmstudioThinkingMaxTokensEnabled)
+            if cloud.lmstudioThinkingMaxTokensEnabled {
+                HStack {
+                    Text("Max Tokens")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    TextField("Max tokens", text: $lmstudioThinkingMaxTokensText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .keyboardType(.numberPad)
+                        .focused($focusedField, equals: .lmstudioThinkingMaxTokens)
+                        .onAppear {
+                            lmstudioThinkingMaxTokensText = String(cloud.lmstudioThinkingMaxTokensValue)
+                        }
+                        .onChange(of: lmstudioThinkingMaxTokensText) { _, newValue in
+                            if let value = Int(newValue), value >= 1 {
+                                cloud.lmstudioThinkingMaxTokensValue = value
+                            }
+                        }
+                }
+            }
+        }
+        
+        // Temperature
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Temperature", isOn: $cloud.lmstudioThinkingTemperatureEnabled)
+            if cloud.lmstudioThinkingTemperatureEnabled {
+                HStack {
+                    Text("Temperature")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.lmstudioThinkingTemperatureValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.lmstudioThinkingTemperatureValue, in: 0...2, step: 0.05)
+            }
+        }
+        
+        // Top-P
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Top-P", isOn: $cloud.lmstudioThinkingTopPEnabled)
+            if cloud.lmstudioThinkingTopPEnabled {
+                HStack {
+                    Text("Top-P")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.lmstudioThinkingTopPValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.lmstudioThinkingTopPValue, in: 0...1, step: 0.01)
+            }
+        }
+        
+        Text("Note: Only enabled parameters will override LM Studio's")
+            .font(.caption)
+            .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private func ollamaThinkingSettingsContent() -> some View {
+        // System Prompt
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Thinking System Prompt (optional)")
+                .bold()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TextField("Leave empty to use Ollama's default", text: $cloud.ollamaThinkingSystemPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...10)
+                .focused($focusedField, equals: .ollamaThinkingSystemPrompt)
+                .submitLabel(.done)
+        }
+        
+        // Max Tokens
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Max Tokens", isOn: $cloud.ollamaThinkingMaxTokensEnabled)
+            if cloud.ollamaThinkingMaxTokensEnabled {
+                HStack {
+                    Text("Max Tokens")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    TextField("Max tokens", text: $ollamaThinkingMaxTokensText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .keyboardType(.numberPad)
+                        .focused($focusedField, equals: .ollamaThinkingMaxTokens)
+                        .onAppear {
+                            ollamaThinkingMaxTokensText = String(cloud.ollamaThinkingMaxTokensValue)
+                        }
+                        .onChange(of: ollamaThinkingMaxTokensText) { _, newValue in
+                            if let value = Int(newValue), value >= 1 {
+                                cloud.ollamaThinkingMaxTokensValue = value
+                            }
+                        }
+                }
+            }
+        }
+        
+        // Temperature
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Temperature", isOn: $cloud.ollamaThinkingTemperatureEnabled)
+            if cloud.ollamaThinkingTemperatureEnabled {
+                HStack {
+                    Text("Temperature")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.ollamaThinkingTemperatureValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.ollamaThinkingTemperatureValue, in: 0...2, step: 0.05)
+            }
+        }
+        
+        // Top-P
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Override Top-P", isOn: $cloud.ollamaThinkingTopPEnabled)
+            if cloud.ollamaThinkingTopPEnabled {
+                HStack {
+                    Text("Top-P")
+                        .bold()
+                        .frame(width: 120, alignment: .leading)
+                    Text(String(format: "%.2f", cloud.ollamaThinkingTopPValue))
+                        .frame(width: 50, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $cloud.ollamaThinkingTopPValue, in: 0...1, step: 0.01)
+            }
+        }
+        
+        Text("Note: Only enabled parameters will override Ollama's")
+            .font(.caption)
+            .foregroundColor(.secondary)
+    }
+    
+    private func validateLMStudioThinkingMaxTokens() {
+        if let value = Int(lmstudioThinkingMaxTokensText) {
+            cloud.lmstudioThinkingMaxTokensValue = max(1, value)
+        }
+        lmstudioThinkingMaxTokensText = String(cloud.lmstudioThinkingMaxTokensValue)
+    }
+
+    private func validateOllamaThinkingMaxTokens() {
+        if let value = Int(ollamaThinkingMaxTokensText) {
+            cloud.ollamaThinkingMaxTokensValue = max(1, value)
+        }
+        ollamaThinkingMaxTokensText = String(cloud.ollamaThinkingMaxTokensValue)
+    }
+    
+    private func validateAllFields() {
+        validateContextLength()
+        validateTopK()
+        validateThinkingContextLength()
+        validateThinkingTopK()
+        validateLMStudioMaxTokens()
+        validateOllamaMaxTokens()
+        validateLMStudioThinkingMaxTokens()
+        validateOllamaThinkingMaxTokens()
+    }
+    
+    private func validateContextLength() {
+        if let value = Int(contextLengthText) {
+            cloud.builtInContextValue = max(256, min(128000, value))
+        }
+        contextLengthText = String(cloud.builtInContextValue)
+    }
+    
+    private func validateTopK() {
+        if let value = Int(topKText) {
+            cloud.builtInTopKValue = max(1, min(200, value))
+        }
+        topKText = String(cloud.builtInTopKValue)
+    }
+    
+    private func validateThinkingContextLength() {
+        if let value = Int(thinkingContextLengthText) {
+            cloud.thinkingContextValue = max(256, min(128000, value))
+        }
+        thinkingContextLengthText = String(cloud.thinkingContextValue)
+    }
+    
+    private func validateThinkingTopK() {
+        if let value = Int(thinkingTopKText) {
+            cloud.thinkingTopKValue = max(1, min(200, value))
+        }
+        thinkingTopKText = String(cloud.thinkingTopKValue)
+    }
+    
+    private func validateLMStudioMaxTokens() {
+        if let value = Int(lmstudioMaxTokensText) {
+            cloud.lmstudioMaxTokensValue = max(1, value)
+        }
+        lmstudioMaxTokensText = String(cloud.lmstudioMaxTokensValue)
+    }
+    
+    private func validateOllamaMaxTokens() {
+        if let value = Int(ollamaMaxTokensText) {
+            cloud.ollamaMaxTokensValue = max(1, value)
+        }
+        ollamaMaxTokensText = String(cloud.ollamaMaxTokensValue)
+    }
+    
+    private func deleteAllConversations() {
+        for conversation in cloud.conversations {
+            cloud.deleteConversation(conversation)
+        }
+        cloud.startNewConversation()
+        dismiss()
+    }
+    
+    private func resetToDefaults() {
+        cloud.builtInSystemPrompt = "/no_think"
+        cloud.builtInContextValue = 16000
+        cloud.builtInTemperatureValue = 0.7
+        cloud.builtInTopKValue = 20
+        cloud.builtInTopPValue = 0.8
+        
+        contextLengthText = String(cloud.builtInContextValue)
+        topKText = String(cloud.builtInTopKValue)
+    }
+    
+    private func resetThinkingToDefaults() {
+        cloud.thinkingSystemPrompt = ""
+        cloud.thinkingContextValue = 16000
+        cloud.thinkingTemperatureValue = 0.6
+        cloud.thinkingTopKValue = 20
+        cloud.thinkingTopPValue = 0.95
+        
+        thinkingContextLengthText = String(cloud.thinkingContextValue)
+        thinkingTopKText = String(cloud.thinkingTopKValue)
+    }
+}
+
+
 
 @MainActor
 final class LocalCacheManager {
@@ -932,77 +2342,117 @@ extension FileManager {
 struct ContentView: View {
     @EnvironmentObject private var cloud: CloudKitManager
     @StateObject private var transcriber = WhisperTranscriber()
-    @StateObject private var downloadManager = ModelDownloadManager.shared // Keep download manager
+    @StateObject private var downloadManager = ModelDownloadManager.shared
+    @StateObject private var tts = TTSManager.shared  // Add this
     @State private var messageText = ""
     @State private var showList = false
     @FocusState private var isFocused: Bool
+    @State private var showSettings = false
 
     var body: some View {
-        // MODIFIED: Removed the download UI check - always show main content
         NavigationView {
             ZStack {
-                if let conv = cloud.currentConversation {
-                    VStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if let conv = cloud.currentConversation {
                         MessagesView(conv: conv, waiting: cloud.isWaitingForResponse)
-                        MessageInput(text: $messageText, isFocused: _isFocused, disabled: cloud.isWaitingForResponse,
-                            transcriber: transcriber) {
-                            send()
-                        }
                     }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        isFocused = false
+                    MessageInput(text: $messageText, isFocused: _isFocused, disabled: cloud.isWaitingForResponse,
+                        transcriber: transcriber) {
+                        send()
                     }
-                    .gesture(
-                        DragGesture(minimumDistance: 20, coordinateSpace: .local)
-                            .onEnded { value in
-                                let verticalTranslation = value.translation.height
-                                let horizontalTranslation = value.translation.width
-                                let swipeDownwardThreshold: CGFloat = 50.0
-
-                                if verticalTranslation > swipeDownwardThreshold &&
-                                   abs(verticalTranslation) > abs(horizontalTranslation) * 1.5 {
-                                    isFocused = false
-                                }
-                            }
-                    )
-                } else {
-                    EmptyState { cloud.startNewConversation() }
                 }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isFocused = false
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 20, coordinateSpace: .local)
+                        .onEnded { value in
+                            let verticalTranslation = value.translation.height
+                            let horizontalTranslation = value.translation.width
+                            let swipeDownwardThreshold: CGFloat = 50.0
+
+                            if verticalTranslation > swipeDownwardThreshold &&
+                               abs(verticalTranslation) > abs(horizontalTranslation) * 1.5 {
+                                isFocused = false
+                            }
+                        }
+                )
+                .onChange(of: cloud.currentConversation?.id) { oldId, newId in
+                    if let oldId = oldId, cloud.serverGeneratingConversationId == oldId {
+                        cloud.clearGeneratingState()
+                    }
+                    // Stop TTS when switching conversations
+                    tts.stop()
+                }
+                
                 if cloud.connectionStatus != "Connected" || cloud.isOffline {
                     StatusOverlay(
                         status: cloud.isOffline ? "Offline Mode" : cloud.connectionStatus,
                         isOffline: cloud.isOffline
                     )
                 }
+                
+                // Add TTS controls overlay
+                if tts.isSpeaking {
+                    TTSControlsOverlay()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .animation(.spring(), value: tts.isSpeaking)
+                }
             }
-            .navigationTitle("Pigeon Chat")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button { showList.toggle() } label: { Image(systemName: "sidebar.left") }
+                    Button { showList.toggle() } label: {
+                        Image("conversation-list")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 27, height: 27)
+                    }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { cloud.startNewConversation() } label: { Image(systemName: "square.and.pencil") }
+                
+                // Model selector in the center
+                ToolbarItem(placement: .principal) {
+                    ModelSelectorView()
+                        .environmentObject(cloud)
+                }
+                
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    // New conversation button
+                    Button { cloud.startNewConversation() } label: {
+                        Image("new-conversation")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 27, height: 27)
+                    }
                 }
             }
         }
         .sheet(isPresented: $showList) { ConversationList().environmentObject(cloud) }
+        .sheet(isPresented: $showSettings) {
+            SettingsView().environmentObject(cloud)
+        }
         .alert("Error", isPresented: Binding(get: { cloud.errorMessage != nil }, set: { _ in cloud.errorMessage = nil })) {
             Button("OK", role: .cancel) { cloud.errorMessage = nil }
         } message: {
             Text(cloud.errorMessage ?? "Unknown error")
         }
         .onAppear {
-            // MODIFIED: Check and automatically load model if present
             Task {
-                await downloadManager.checkModelStatus()
+                if CloudKitManager.shared.transcriptionEnabled {
+                    await downloadManager.checkModelStatus()
+                }
             }
-            // Prevent screen from sleeping while app is active
             UIApplication.shared.isIdleTimerDisabled = true
+            
+            if cloud.isServerGenerating {
+                cloud.clearGeneratingState()
+            }
         }
         .onDisappear {
-            // Re-enable screen sleep when leaving the app
             UIApplication.shared.isIdleTimerDisabled = false
+            // Stop TTS when app goes to background
+            tts.stop()
         }
     }
 
@@ -1014,6 +2464,7 @@ struct ContentView: View {
         isFocused = false
     }
 }
+
 
 @MainActor
 final class ModelDownloadManager: ObservableObject {
@@ -1070,6 +2521,17 @@ final class ModelDownloadManager: ObservableObject {
     
     // NEW: Check model status and auto-load if present
     func checkModelStatus() async {
+        // Check if transcription is enabled first
+        let transcriptionEnabled = UserDefaults.standard.bool(forKey: "transcriptionEnabled")
+        guard transcriptionEnabled else {
+            await MainActor.run {
+                isModelReady = false
+                isLoading = false
+                statusMessage = "Transcription disabled"
+            }
+            return
+        }
+        
         // ❶ Fast path: nothing on disk – user must download
         guard modelIsDownloaded else {
             await MainActor.run {
@@ -1400,50 +2862,116 @@ struct MessagesView: View {
 
 struct MessageBubble: View {
     let msg: Message
-    
-    // 1. State to provide visual feedback when content is copied
     @State private var copied = false
+    @State private var showFullAttachment = false
+    @StateObject private var tts = TTSManager.shared
+
+    private var bubbleBackground: Color {
+        msg.role == "user"
+        ? Color(.systemGray5)
+        : Color(.systemBackground)
+    }
+
+    private var textColour: Color { .primary }
 
     private var maxWidthFactor: CGFloat {
         msg.role == "assistant" ? 1.00 : 0.75
+    }
+    
+    // Parse message and attachment
+    private var parsedContent: (message: String, attachment: String?) {
+        if msg.role == "user" {
+            if let range = msg.content.range(of: "\n\n[Attached content]:\n") {
+                let message = String(msg.content[..<range.lowerBound])
+                let attachmentStart = msg.content.index(range.upperBound, offsetBy: 0)
+                let attachment = String(msg.content[attachmentStart...])
+                return (message, attachment)
+            }
+        }
+        return (msg.displayContent, nil)
     }
 
     var body: some View {
         HStack {
             if msg.role == "user" { Spacer() }
 
-            VStack(alignment: msg.role == "user" ? .trailing : .leading, spacing: 5) { // Added spacing
+            VStack(alignment: msg.role == "user" ? .trailing : .leading,
+                   spacing: 5) {
 
-                // ───── Message text (Unchanged) ─────
+                // ── Message text ──
                 Group {
                     if msg.role == "assistant" {
                         Markdown(msg.displayContent)
                             .markdownTheme(.basic)
                             .font(.body)
                     } else {
-                        Text(msg.displayContent)
+                        Text(parsedContent.message)
                     }
                 }
-                .foregroundColor(msg.role == "user" ? .white : .primary)
+                .foregroundColor(textColour)
                 .padding(12)
-                .background(msg.role == "user"
-                            ? Color.accentColor
-                            : Color(.secondarySystemBackground))
+                .background(bubbleBackground)
                 .cornerRadius(16)
+                
+                // ── Attachment preview (if present) ──
+                if let attachmentText = parsedContent.attachment {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showFullAttachment.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "paperclip")
+                                    .font(.caption)
+                                Text("Attached content")
+                                    .font(.caption)
+                                Spacer()
+                                Image(systemName: showFullAttachment ? "chevron.up" : "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        if showFullAttachment {
+                            Text(attachmentText)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 12)
+                                .padding(.bottom, 8)
+                                .lineLimit(nil)
+                        } else {
+                            Text(attachmentText)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                                .padding(.horizontal, 12)
+                                .padding(.bottom, 8)
+                        }
+                    }
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
+                    .frame(maxWidth: UIScreen.main.bounds.width * maxWidthFactor)
+                }
 
-                // 2. NEW: Meta row with timestamp and copy button
+                // ── Meta row (timestamp / copy / speak) ──
                 HStack(spacing: 10) {
-                    // Re-order for aesthetic reasons depending on alignment
                     if msg.role == "user" {
+                        // Only show copy button and timestamp for user messages
                         copyButton
                         timestampText
                     } else {
+                        // Show all three for assistant messages
                         timestampText
                         copyButton
+                        speakButton
                     }
                 }
-                .font(.caption) // Apply font to the whole row
-                .foregroundColor(.secondary) // Apply color to the whole row
+                .font(.caption)
+                .foregroundColor(.secondary)
             }
             .frame(maxWidth: UIScreen.main.bounds.width * maxWidthFactor,
                    alignment: msg.role == "user" ? .trailing : .leading)
@@ -1452,39 +2980,56 @@ struct MessageBubble: View {
         }
     }
     
-    // Helper view for the timestamp to keep the body clean
     private var timestampText: some View {
         Text(msg.timestamp, style: .time)
     }
 
-    // Helper view for the new copy button
     private var copyButton: some View {
         Button(action: copyToClipboard) {
-            // Use a Label and .iconOnly to be semantic.
-            // It changes icon based on the copied state.
             Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                 .labelStyle(.iconOnly)
-                .transition(.opacity.combined(with: .scale)) // Nice animation for the change
+                .transition(.opacity.combined(with: .scale))
         }
-        .buttonStyle(.plain) // Use .plain to avoid the default blue tint
-        .animation(.easeInOut, value: copied) // Animate the icon change
+        .buttonStyle(.plain)
+        .animation(.easeInOut, value: copied)
     }
     
-    // 3. The function to handle the copy action and feedback
+    private var speakButton: some View {
+        Button(action: toggleSpeech) {
+            Image(systemName: speakerIcon)
+                .foregroundColor(tts.currentMessageId == msg.id ? .accentColor : .secondary)
+                .animation(.easeInOut, value: tts.currentMessageId == msg.id)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private var speakerIcon: String {
+        if tts.currentMessageId == msg.id {
+            return tts.isPaused ? "speaker.slash.fill" : "speaker.wave.3.fill"
+        }
+        return "speaker.wave.2.fill"
+    }
+    
     private func copyToClipboard() {
-        // Haptic feedback for a better user experience
         let haptic = UIImpactFeedbackGenerator(style: .medium)
         haptic.impactOccurred()
-
-        // Copy the message's displayable content to the system clipboard
         UIPasteboard.general.string = msg.displayContent
-
-        // Trigger the visual feedback
         copied = true
-
-        // Reset the feedback icon after 2 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             copied = false
+        }
+    }
+    
+    private func toggleSpeech() {
+        let haptic = UIImpactFeedbackGenerator(style: .light)
+        haptic.impactOccurred()
+        
+        if tts.currentMessageId == msg.id {
+            // Currently speaking this message, stop it
+            tts.stop()
+        } else {
+            // Start speaking this message
+            tts.speak(text: msg.displayContent, messageId: msg.id)
         }
     }
 }
@@ -1504,20 +3049,25 @@ struct LoadingBubble: View {
     }
 }
 
-// MARK: Input bar - MODIFIED
+// MARK: Input bar - MODIFIED with Thinking Toggle
 struct MessageInput: View {
     @Binding var text: String
     @FocusState var isFocused: Bool
     var disabled: Bool
     @ObservedObject var transcriber: WhisperTranscriber
-    @ObservedObject private var downloadManager = ModelDownloadManager.shared // NEW: Add download manager
-    @State private var showDownloadAlert = false // NEW: For alert
+    @ObservedObject private var downloadManager = ModelDownloadManager.shared
+    @EnvironmentObject private var cloud: CloudKitManager
+    @StateObject private var attachmentManager = AttachmentManager()
+    @State private var showDownloadAlert = false
+    @State private var showAttachmentOptions = false // NEW
+    @State private var showImagePicker = false // NEW
+    @State private var showDocumentPicker = false // NEW
     var send: () -> Void
 
     var body: some View {
-        VStack(spacing: 4) {
-            // Show compilation status if compiling
-            if downloadManager.isCompiling {
+        VStack(spacing: 8) {
+            // Show compilation status if compiling AND transcription is enabled
+            if downloadManager.isCompiling && cloud.transcriptionEnabled {
                 Text("Compiling transcription model for your device... This takes roughly 5 minutes and is done only once (and with each app update)")
                     .font(.caption)
                     .foregroundColor(.orange)
@@ -1526,132 +3076,223 @@ struct MessageInput: View {
                     .padding(.top, 4)
             }
             
-            HStack(spacing: 8) {
-
-                // ——— Prompt field ———
-                TextField("Type…", text: $text, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...4)
-                    .disabled(disabled)
-                    .submitLabel(.send)
-                    .focused($isFocused)
-                    .onSubmit {
-                        if !disabled && !text.isEmpty { send() }
-                    }
-                    .onChange(of: disabled) { if $1 { isFocused = false } }
-
-            // ——— Mic/Download button (only supported devices) ———
-            if transcriber.isSupported {
-                Button {
-                    if downloadManager.isModelReady {
-                        // Model is ready, use as microphone
-                        if !transcriber.isTranscribing { // Don't allow action during transcription
-                            transcriber.toggle()
+            // Show attachment preview if present
+            if !attachmentManager.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachmentManager.attachments) { attachment in
+                            AttachmentPreview(
+                                attachment: attachment,
+                                onRemove: {
+                                    attachmentManager.removeAttachment(id: attachment.id)
+                                }
+                            )
                         }
-                    } else if downloadManager.isDownloading || downloadManager.isLoading || downloadManager.isCompiling {
-                        // Currently downloading, loading, or compiling, do nothing
-                    } else {
-                        // Model not downloaded, show confirmation
-                        showDownloadAlert = true
                     }
-                } label: {
-                    ZStack {
-                        if downloadManager.isModelReady {
-                            if transcriber.isTranscribing {
-                                // Transcribing - show spinning circle
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                    .scaleEffect(0.8)
-                            } else {
-                                // Recording or idle
-                                Image(systemName: transcriber.isRecording ? "stop.fill" : "mic.fill")
-                                    .foregroundColor(.white)
+                    .padding(.horizontal)
+                }
+                .frame(maxHeight: 100)
+            }
+            
+            // ——— Prompt field (full width) ———
+            TextField("Type…", text: $text, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .disabled(disabled || cloud.isServerGenerating)
+                .focused($isFocused)
+                .onChange(of: disabled) { if $1 { isFocused = false } }
+                .padding(.horizontal)
+            
+            // ——— Buttons row below the field ———
+            ZStack {
+                // ❶ Centered overlay when recording
+                if transcriber.isRecording {
+                    Text("Listening…")
+                        .font(.system(size: 18))
+                        .foregroundColor(.secondary)
+                        .transition(.opacity)
+                }
+                
+                HStack(spacing: 8) {
+                    // attachment button
+                    Button {
+                        showAttachmentOptions = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 27, weight: .bold))
+                            .foregroundColor(.black)
+                    }
+                    .disabled(attachmentManager.isProcessing || disabled || cloud.isServerGenerating)
+                                        
+                    // Web search toggle button
+                    Button {
+                        cloud.enableWebSearch.toggle()
+                    } label: {
+                        Image(cloud.enableWebSearch ? "web-search-on" : "web-search-off")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 27, height: 27)
+                    }
+                    
+                    // Thinking toggle button (only show if thinking is available)
+                    if cloud.isThinkingAvailable {
+                        Button {
+                            cloud.enableThinking.toggle()
+                        } label: {
+                            Image(cloud.enableThinking ? "thinking-enabled" : "thinking-disabled")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 27, height: 27)
+                                }
+                                .accessibilityLabel(cloud.enableThinking ? "Thinking mode enabled"
+                                                                         : "Thinking mode disabled")
                             }
-                        } else if downloadManager.isDownloading {
-                            // Download in progress - show progress circle
-                            Circle()
-                                .stroke(Color.white.opacity(0.3), lineWidth: 3)
-                                .frame(width: 20, height: 20)
-                            Circle()
-                                .trim(from: 0, to: CGFloat(downloadManager.downloadProgress))
-                                .stroke(Color.white, lineWidth: 3)
-                                .frame(width: 20, height: 20)
-                                .rotationEffect(.degrees(-90))
-                                .animation(.linear, value: downloadManager.downloadProgress)
-                        } else if downloadManager.isLoading || downloadManager.isCompiling {
-                            // Loading or compiling model - show spinning circle
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                .scaleEffect(0.8)
-                        } else {
-                            // Download icon
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundColor(.white)
+                    
+                    Spacer() // Push other buttons to the right
+                    
+                    // ——— Stop generation button (when server is generating) ———
+                    if cloud.isServerGenerating {
+                        Button {
+                            if !cloud.isStopRequestInProgress {
+                                cloud.requestStopGeneration()
+                            }
+                        } label: {
+                            if cloud.isStopRequestInProgress {
+                                // Show progress indicator while stop request is in progress
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                                    .scaleEffect(1.3)
+                                    .frame(width: 27, height: 27)
+                            } else {
+                                // Show stop button image
+                                Image("stop-generation")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 27, height: 27)
+                            }
+                        }
+                        .disabled(cloud.isStopRequestInProgress)
+                    }
+                    
+                    // ——— Mic/Download button (only supported devices AND transcription enabled) ———
+                    if transcriber.isSupported && cloud.transcriptionEnabled {
+                        Button {
+                            if downloadManager.isModelReady {
+                                // Model is ready, use as microphone
+                                if !transcriber.isTranscribing && !cloud.isServerGenerating {
+                                    transcriber.toggle()
+                                }
+                            } else if downloadManager.isDownloading || downloadManager.isLoading || downloadManager.isCompiling {
+                                // Currently downloading, loading, or compiling, do nothing
+                            } else {
+                                // Model not downloaded, show confirmation
+                                showDownloadAlert = true
+                            }
+                        } label: {
+                            if downloadManager.isModelReady {
+                                if transcriber.isTranscribing {
+                                    // Transcribing - show spinning circle (keeping as is but black)
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                                        .scaleEffect(1.3)
+                                        .frame(width: 27, height: 27)
+                                } else if transcriber.isRecording {
+                                    // Recording - show stop recording image
+                                    Image("stop-recording")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 27, height: 27)
+                                } else {
+                                    // Idle - show microphone image
+                                    Image("microphone")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 27, height: 27)
+                                }
+                            } else if downloadManager.isDownloading {
+                                // Download in progress - show progress circle (keeping as is but black)
+                                ZStack {
+                                    Circle()
+                                        .stroke(Color.black.opacity(0.3), lineWidth: 4)
+                                        .frame(width: 27, height: 27)
+                                    Circle()
+                                        .trim(from: 0, to: CGFloat(downloadManager.downloadProgress))
+                                        .stroke(Color.black, lineWidth: 4)
+                                        .frame(width: 27, height: 27)
+                                        .rotationEffect(.degrees(-90))
+                                        .animation(.linear, value: downloadManager.downloadProgress)
+                                }
+                                .frame(width: 27, height: 27)
+                            } else if downloadManager.isLoading || downloadManager.isCompiling {
+                                // Loading or compiling model - show spinning circle (keeping as is but black)
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                                    .scaleEffect(1.3)
+                                    .frame(width: 27, height: 27)
+                            } else {
+                                // Download icon (keeping as is but black)
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .foregroundColor(.black)
+                                    .font(.system(size: 27))
+                                    .frame(width: 27, height: 27)
+                            }
+                        }
+                        .disabled(downloadManager.isDownloading || downloadManager.isLoading || downloadManager.isCompiling || transcriber.isTranscribing || cloud.isServerGenerating)
+                        .accessibilityLabel(
+                            downloadManager.isModelReady ?
+                                (transcriber.isRecording ? "Stop recording" :
+                                 (transcriber.isTranscribing ? "Processing speech" : "Start recording")) :
+                                (downloadManager.isDownloading ? "Downloading model" :
+                                 (downloadManager.isLoading ? "Loading model" :
+                                  (downloadManager.isCompiling ? "Compiling model" : "Download voice model")))
+                        )
+                        .alert("Download Voice Transcription Model", isPresented: $showDownloadAlert) {
+                            Button("Cancel", role: .cancel) { }
+                            Button("Continue") {
+                                Task {
+                                    await downloadManager.startDownload()
+                                }
+                            }
+                        } message: {
+                            Text("Do you want to download a local transcription model? It will allow you to prompt with your voice. The model weighs roughly 600 MB. After the download is complete, there will be a one time compilation process that can take up to 5 minutes.")
+                        }
+                        .alert("Model Compilation Required",
+                               isPresented: $downloadManager.showCompilationAlert) {
+                            Button("Not now", role: .cancel) {
+                                downloadManager.statusMessage = "Model not compiled"
+                            }
+                            Button("Continue") {
+                                Task { await downloadManager.loadModel() }
+                            }
+                        } message: {
+                            Text("The voice model needs to be compiled for your device. This is an intensive process that only happens once (and after app updates) and takes roughly 5 minutes. Please keep the app open during this process.")
                         }
                     }
-                    .frame(width: 36, height: 36)
-                    .background(
-                        downloadManager.isModelReady ?
-                            (transcriber.isRecording ? Color.red :
-                             (transcriber.isTranscribing ? Color.orange : Color.accentColor)) :
-                            ((downloadManager.isDownloading || downloadManager.isLoading || downloadManager.isCompiling) ? Color.gray : Color.accentColor)
-                    )
-                    .clipShape(Circle())
-                }
-                .disabled(downloadManager.isDownloading || downloadManager.isLoading || downloadManager.isCompiling || transcriber.isTranscribing)
-                .accessibilityLabel(
-                    downloadManager.isModelReady ?
-                        (transcriber.isRecording ? "Stop recording" :
-                         (transcriber.isTranscribing ? "Processing speech" : "Start recording")) :
-                        (downloadManager.isDownloading ? "Downloading model" :
-                         (downloadManager.isLoading ? "Loading model" :
-                          (downloadManager.isCompiling ? "Compiling model" : "Download voice model")))
-                )
-                .alert("Download Voice Transcription Model", isPresented: $showDownloadAlert) {
-                    Button("Cancel", role: .cancel) { }
-                    Button("Continue") {
-                        Task {
-                            await downloadManager.startDownload()
-                        }
-                    }
-                } message: {
-                    Text("Do you want to download a local transcription model? It will allow you to prompt with your voice. The model weighs roughly 600 MB. After the download is complete, there will be a one time compilation process that can take up to 5 minutes.")
-                }
-                .alert("Model Compilation Required",
-                       isPresented: $downloadManager.showCompilationAlert) {
-                    // ① Optional cancel / dismiss
-                    Button("Not now", role: .cancel) {
-                        // You can update the status if you wish
-                        downloadManager.statusMessage = "Model not compiled"
-                    }
 
-                    // ② Proceed with compilation
-                    Button("Continue") {
-                        Task { await downloadManager.loadModel() }
-                    }
-                } message: {
-                    Text("The voice model needs to be compiled for your device. This is an intensive process that only happens once (and after app updates) and takes roughly 5 minutes. Please keep the app open during this process.")
-                }
-            }
-
-                // ——— Send button ———
-                Button(action: send) {
-                    Image(systemName: "paperplane.fill")
-                        .foregroundColor(.white)
-                        .frame(width: 36, height: 36)
-                        .background((text.isEmpty || disabled) ? Color.gray : Color.accentColor)
-                        .clipShape(Circle())
-                }
-                .disabled(text.isEmpty || disabled)
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
-        }
-        .background(Color(.systemBackground))
+                    // Send button (only show when active)
+                    if (!text.isEmpty || attachmentManager.hasAttachments) && !disabled && !cloud.isServerGenerating {
+                        Button {
+                            sendWithAttachment()
+                        } label: {
+                            Image("send-active")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 27, height: 27)
+                                     }
+                                   }
+                                 }
+                               }
+                                .padding(.horizontal)
+                                .padding(.bottom, 6)
+                            }
+                            .background(Color(.systemBackground))
         // When a new transcript arrives, stuff it into the field
         .onReceive(transcriber.$latestTranscript.compactMap { $0 }) { transcript in
-            text = transcript
-            isFocused = true
+            if !cloud.isServerGenerating {
+                let hadFocus = isFocused    // was the field already focused?
+                text = transcript
+                isFocused = hadFocus        // restore previous focus state
+            }
         }
         // Reset transcript when starting new recording
         .onChange(of: transcriber.isRecording) { oldValue, newValue in
@@ -1660,22 +3301,67 @@ struct MessageInput: View {
                 transcriber.latestTranscript = nil
             }
         }
+        .confirmationDialog("Add Attachment", isPresented: $showAttachmentOptions) {
+                    Button("Photo Library") {
+                        showImagePicker = true
+                    }
+                    Button("Files") {
+                        showDocumentPicker = true
+                    }
+                    Button("Cancel", role: .cancel) { }
+                }
+        .sheet(isPresented: $showImagePicker) {
+            ImagePicker { images in
+                Task {
+                    for (index, image) in images.enumerated() {
+                        await attachmentManager.processImage(
+                            image,
+                            fileName: "Image \(index + 1)"
+                        )
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showDocumentPicker) {
+            DocumentPicker { documents in
+                Task {
+                    for (url, fileName) in documents {
+                        await attachmentManager.processPDF(
+                            at: url,
+                            fileName: fileName
+                        )
+                    }
+                }
+            }
+        }
+                .onReceive(transcriber.$latestTranscript.compactMap { $0 }) { transcript in
+                    if !cloud.isServerGenerating {
+                        let hadFocus = isFocused
+                        text = transcript
+                        isFocused = hadFocus
+                    }
+                }
+                .onChange(of: transcriber.isRecording) { oldValue, newValue in
+                    if newValue {
+                        transcriber.latestTranscript = nil
+                    }
+                }
+            }
+            
+    private func sendWithAttachment() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || attachmentManager.hasAttachments else { return }
+        
+        cloud.sendMessage(
+            trimmed.isEmpty ? "Please analyze the attached content" : trimmed,
+            attachmentText: attachmentManager.combinedAttachmentText
+        )
+        text = ""
+        attachmentManager.clearAllAttachments()
+        isFocused = false
     }
-}
+        }
 
-// MARK: Empty state
-struct EmptyState: View {
-    var action: () -> Void
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 60)).foregroundColor(.accentColor)
-            Text("Start a new conversation").font(.title2).bold()
-            Text("Your AI assistant is ready").foregroundColor(.secondary)
-            Button(action: action) { Label("New Chat", systemImage: "plus.message") }
-                .padding().frame(minWidth: 200).background(Color.accentColor).foregroundColor(.white).cornerRadius(10)
-        }.padding()
-    }
-}
 
 // MARK: Overlay for status
 struct StatusOverlay: View {
@@ -1710,62 +3396,98 @@ struct ConversationList: View {
     @EnvironmentObject private var cloud: CloudKitManager
     @Environment(\.dismiss) private var dismiss
     @State private var showCacheSettings = false
+    @State private var showSettings = false
     
     var body: some View {
         NavigationView {
-            List {
-                Section("Recent") {
-                    ForEach(cloud.conversations) { c in
-                        ConversationRow(conv: c, selected: c.id == cloud.currentConversation?.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                cloud.selectConversation(c)
-                                dismiss()
-                            }
+            VStack(spacing: 0) {
+                // Custom header with settings
+                VStack(spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("History & Settings")
+                                .font(.title2)
+                                .bold()
+                                .padding(16)
+                        }
+                        
+                        Spacer()
+                        
+                        Button {
+                            showSettings = true
+                        } label: {
+                            Image("settings")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 26, height: 26)
+                                .padding(8)
+                                .background(Color(.systemGray6))
+                                .clipShape(Circle())
+                        }
                     }
-                    .onDelete { idx in
-                        idx.map { cloud.deleteConversation(cloud.conversations[$0]) }
-                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
                 }
+                .background(Color(.systemBackground))
                 
-                // Sync Status Section
-                Section {
-                    if let last = cloud.lastSync {
-                        HStack {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .foregroundColor(.green)
-                            Text("Last synced")
-                            Spacer()
-                            Text(last, style: .relative)
-                                .foregroundColor(.secondary)
+                Divider()
+                
+                // The list content
+                List {
+                    Section("Recent Conversations") {
+                        ForEach(cloud.conversations) { c in
+                            ConversationRow(conv: c, selected: c.id == cloud.currentConversation?.id)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    cloud.selectConversation(c)
+                                    dismiss()
+                                }
                         }
-                        .font(.caption)
-                    }
-                    
-                    if cloud.isOffline {
-                        HStack {
-                            Image(systemName: "wifi.slash")
-                                .foregroundColor(.blue)
-                            Text("Offline - Using cached data")
-                                .font(.caption)
+                        .onDelete { idx in
+                            idx.map { cloud.deleteConversation(cloud.conversations[$0]) }
                         }
                     }
                     
-                    Button {
-                        showCacheSettings = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "internaldrive")
-                            Text("Cache: \(LocalCacheManager.shared.getCacheSizeString())")
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundColor(.secondary)
+                    // Sync Status Section
+                    Section {
+                        if let last = cloud.lastSync {
+                            HStack {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundColor(.green)
+                                Text("Last synced")
+                                Spacer()
+                                Text(last, style: .relative)
+                                    .foregroundColor(.secondary)
+                            }
+                            .font(.caption)
                         }
+                        
+                        if cloud.isOffline {
+                            HStack {
+                                Image(systemName: "wifi.slash")
+                                    .foregroundColor(.blue)
+                                Text("Offline - Using cached data")
+                                    .font(.caption)
+                            }
+                        }
+                        
+                        Button {
+                            showCacheSettings = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "internaldrive")
+                                Text("Cache: \(LocalCacheManager.shared.getCacheSizeString())")
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .foregroundColor(.primary)
                     }
-                    .foregroundColor(.primary)
                 }
+                .listStyle(InsetGroupedListStyle())
             }
-            .navigationTitle("Conversations")
+            .navigationBarHidden(true)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { dismiss() }
@@ -1776,6 +3498,10 @@ struct ConversationList: View {
             }
             .sheet(isPresented: $showCacheSettings) {
                 CacheSettingsView()
+                    .environmentObject(cloud)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
                     .environmentObject(cloud)
             }
         }
@@ -1856,17 +3582,172 @@ struct CacheSettingsView: View {
     }
 }
 
+
+// MARK: - Image Picker
+struct ImagePicker: UIViewControllerRepresentable {
+    let onImagesPicked: ([UIImage]) -> Void  // Changed to array
+    @Environment(\.dismiss) private var dismiss
+    
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 0  // 0 means unlimited
+        
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: ImagePicker
+        
+        init(_ parent: ImagePicker) {
+            self.parent = parent
+        }
+        
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.dismiss()
+            
+            guard !results.isEmpty else { return }
+            
+            var images: [UIImage] = []
+            let group = DispatchGroup()
+            
+            for result in results {
+                group.enter()
+                result.itemProvider.loadObject(ofClass: UIImage.self) { object, error in
+                    if let image = object as? UIImage {
+                        images.append(image)
+                    }
+                    group.leave()
+                }
+            }
+            
+            group.notify(queue: .main) {
+                self.parent.onImagesPicked(images)
+            }
+        }
+    }
+}
+
+
+struct AttachmentPreview: View {
+    let attachment: AttachmentManager.Attachment
+    let onRemove: () -> Void
+    @State private var isExpanded = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: attachment.type == .pdf ? "doc.fill" : "photo.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(attachment.fileName)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+            }
+            
+            Text(attachment.extractedText)
+                .font(.caption)
+                .lineLimit(isExpanded ? nil : 3)
+                .padding(8)
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
+                .onTapGesture {
+                    withAnimation {
+                        isExpanded.toggle()
+                    }
+                }
+        }
+        .frame(width: 250)
+        .padding(8)
+        .background(Color(.systemGray5))
+        .cornerRadius(12)
+    }
+}
+
+
+// MARK: - Document Picker
+struct DocumentPicker: UIViewControllerRepresentable {
+    let onDocumentsPicked: ([(URL, String)]) -> Void  // Include filename
+    @Environment(\.dismiss) private var dismiss
+    
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf])
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = true  // Allow multiple selection
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let parent: DocumentPicker
+        
+        init(_ parent: DocumentPicker) {
+            self.parent = parent
+        }
+        
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            var documents: [(URL, String)] = []
+            
+            for url in urls {
+                guard url.startAccessingSecurityScopedResource() else { continue }
+                defer { url.stopAccessingSecurityScopedResource() }
+                
+                do {
+                    let tempURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                        .appendingPathExtension("pdf")
+                    
+                    try FileManager.default.copyItem(at: url, to: tempURL)
+                    let fileName = url.lastPathComponent
+                    documents.append((tempURL, fileName))
+                } catch {
+                    print("Failed to copy PDF: \(error)")
+                }
+            }
+            
+            parent.onDocumentsPicked(documents)
+            parent.dismiss()
+        }
+        
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            parent.dismiss()
+        }
+    }
+}
+
+
 struct ConversationRow: View {
     let conv: Conversation
     let selected: Bool
     
-    // Computed property to get the first user message
+    // First user prompt (or placeholder if none)
     var firstPrompt: String {
         conv.messages.first(where: { $0.role == "user" })?.displayContent ?? "New conversation"
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            // Title row
             HStack {
                 Text(firstPrompt)
                     .lineLimit(2)
@@ -1877,10 +3758,9 @@ struct ConversationRow: View {
                         .foregroundColor(.accentColor)
                 }
             }
+            
+            // Meta row (only the timestamp now)
             HStack {
-                Text("\(conv.messages.count) messages")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 Spacer()
                 Text(conv.lastUpdated, style: .relative)
                     .font(.caption)
