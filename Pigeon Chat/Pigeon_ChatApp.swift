@@ -178,6 +178,9 @@ final class CloudKitManager: NSObject, ObservableObject {
             await refreshAccountStatus()
             await ensureSubscriptionExists()
             await syncConversations()
+
+            // --- Create the blank conversation *after* CloudKit has synced ---
+            //await MainActor.run { self.startNewConversation() }
         }
     }
 
@@ -326,14 +329,14 @@ final class CloudKitManager: NSObject, ObservableObject {
         let cached = LocalCacheManager.shared.loadAllConversations()
 
         conversations       = cached
-        currentConversation = cached.first
+        //currentConversation = cached.first
         hasCachedData       = !cached.isEmpty
         lastSync            = LocalCacheManager.shared.loadMetadata().lastFullSync
 
         print("[iOS] Pre‑loaded \(cached.count) conversations from cache")
         
         // Add this line to ensure we have a conversation
-        ensureConversationExists()
+        //ensureConversationExists()
     }
 
     // MARK: - Notification Setup
@@ -639,7 +642,12 @@ final class CloudKitManager: NSObject, ObservableObject {
             }
 
             // Step 4: Determine which local records to delete.
-            let idsToDeleteLocally = localIDs.subtracting(serverIDs)
+            let idsToDeleteLocally = localIDs
+                .subtracting(serverIDs)
+                .filter { id in
+                    guard let meta = localCacheMetadata.conversations[id] else { return false }
+                    return meta.recordChangeTag != nil          // keep never-synced locals
+                }
             if !idsToDeleteLocally.isEmpty {
                 print("[iOS] Deleting \(idsToDeleteLocally.count) local conversations that are no longer on the server.")
                 for id in idsToDeleteLocally {
@@ -657,15 +665,10 @@ final class CloudKitManager: NSObject, ObservableObject {
             }
             
             // If the current conversation was deleted or never set, default to the most recent one.
-            if currentConversation == nil || !conversations.contains(where: { $0.id == currentConversation?.id }) {
-                    if conversations.isEmpty {
-                        // No conversations at all, create a new one
-                        ensureConversationExists()
-                    } else {
-                        // We have conversations, just select the first one
-                        currentConversation = conversations.first
-                    }
-                }
+            if currentConversation == nil,
+               let first = conversations.first {
+                currentConversation = first
+            }
                 
                 lastSync = .now
                 LocalCacheManager.shared.updateLastFullSync()
@@ -983,21 +986,42 @@ final class CloudKitManager: NSObject, ObservableObject {
             }
 
             let savedRecord = try await privateDB.save(recordToSave)
-            print("[iOS] Successfully saved to CloudKit with model: \(selectedModel.displayName), thinking: \(enableThinking)")
-            
-            // Update cache with server's change tag
-            try? LocalCacheManager.shared.saveConversation(
-                conv,
-                changeTag: savedRecord.recordChangeTag,
-                modificationDate: savedRecord.modificationDate ?? Date()
-            )
-            
-            lastSync = .now
-        } catch {
-            print("[iOS] Error saving to CloudKit: \(error)")
-            errorMessage = "Save Error: \(error.localizedDescription)"
-        }
-    }
+                    print("[iOS] Successfully saved to CloudKit with model: \(selectedModel.displayName), thinking: \(enableThinking)")
+                    
+                    // Update cache with server's change tag
+                    try? LocalCacheManager.shared.saveConversation(
+                        conv,
+                        changeTag: savedRecord.recordChangeTag,
+                        modificationDate: savedRecord.modificationDate ?? Date()
+                    )
+                    
+                    lastSync = .now
+                } catch let error as CKError where error.code == .serverRecordChanged {
+                    // Handle the case where record was modified between fetch and save
+                    print("[iOS] Record was modified on server, retrying...")
+                    await saveConversation(needsResponse: needsResponse)
+                } catch let error as CKError where error.code == .zoneNotFound || error.code == .userDeletedZone {
+                    // Handle zone issues
+                    print("[iOS] Zone issue: \(error). Will retry on next sync.")
+                } catch {
+                    print("[iOS] Error saving to CloudKit: \(error)")
+                    // Only show user-facing errors for non-recoverable issues
+                    if !isHandleableError(error) {
+                        errorMessage = "Save Error: \(error.localizedDescription)"
+                    }
+                }
+            }
+
+            private func isHandleableError(_ error: Error) -> Bool {
+                guard let ckError = error as? CKError else { return false }
+                
+                switch ckError.code {
+                case .serverRecordChanged, .zoneNotFound, .userDeletedZone, .changeTokenExpired:
+                    return true
+                default:
+                    return false
+                }
+            }
     
     func displayName(for option: ModelOption) -> String {
             switch option.provider {
@@ -2125,7 +2149,7 @@ struct SettingsView: View {
         for conversation in cloud.conversations {
             cloud.deleteConversation(conversation)
         }
-        cloud.startNewConversation()
+        //cloud.startNewConversation()
         dismiss()
     }
     
@@ -2522,7 +2546,8 @@ final class ModelDownloadManager: ObservableObject {
     // NEW: Check model status and auto-load if present
     func checkModelStatus() async {
         // Check if transcription is enabled first
-        let transcriptionEnabled = UserDefaults.standard.bool(forKey: "transcriptionEnabled")
+        // Change this line to use CloudKitManager's value instead of UserDefaults directly
+        let transcriptionEnabled = CloudKitManager.shared.transcriptionEnabled
         guard transcriptionEnabled else {
             await MainActor.run {
                 isModelReady = false
@@ -2532,6 +2557,7 @@ final class ModelDownloadManager: ObservableObject {
             return
         }
         
+        // Rest of the method remains the same...
         // ❶ Fast path: nothing on disk – user must download
         guard modelIsDownloaded else {
             await MainActor.run {
@@ -3805,6 +3831,7 @@ struct Pigeon_ChatApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(CloudKitManager.shared)
+                         .preferredColorScheme(.light)
         }
     }
 }
