@@ -2363,19 +2363,238 @@ extension FileManager {
 }
 
 // MARK: - SwiftUI Views
+
+struct SidePanelOverlay: View {
+    @Binding var isShowing: Bool
+    @EnvironmentObject private var cloud: CloudKitManager
+    @State private var dragOffset: CGFloat = 0
+    @State private var showSettings = false
+    
+    private let panelWidth: CGFloat = UIScreen.main.bounds.width * 0.85
+    private let shadowRadius: CGFloat = 10
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                // Background overlay
+                if isShowing || dragOffset < 0 {
+                    Color.black
+                        .opacity(backgroundOpacity)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            withAnimation(.spring()) {
+                                isShowing = false
+                                dragOffset = 0
+                            }
+                        }
+                        .transition(.opacity)
+                }
+                
+                // Side panel
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        
+                        
+                        // Conversation list (scrollable)
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(cloud.conversations) { conversation in
+                                    ConversationRowForSidePanel(
+                                        conv: conversation,
+                                        selected: conversation.id == cloud.currentConversation?.id
+                                    )
+                                    .onTapGesture {
+                                        cloud.selectConversation(conversation)
+                                        withAnimation(.spring()) {
+                                            isShowing = false
+                                            dragOffset = 0
+                                        }
+                                    }
+                                    
+                                    Divider()
+                                        .padding(.leading)
+                                }
+                            }
+                            .padding(.top, 80)
+                            .padding(.bottom, 130) // Space for settings button
+                        }
+                        
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: panelWidth)
+                    .background(Color(.systemBackground))
+                    .overlay(
+                        // Settings button (fixed at bottom)
+                        VStack {
+                            Spacer()
+                            
+                            VStack(spacing: 0) {
+                                Divider()
+                                
+                                Button {
+                                    showSettings = true
+                                } label: {
+                                    HStack {
+                                        Text("Settings")
+                                            .font(.headline)
+                                            .padding(.leading, 16)
+                                        
+                                        Spacer()
+                                        
+                                        Image("settings")
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 24, height: 24)
+                                        
+                                    }
+                                    .foregroundColor(.primary)
+                                    .padding()
+                                }
+                                .background(Color(.white))
+                                .padding(.bottom, 30)
+                            }
+                        }
+                    )
+                    .shadow(radius: shadowRadius)
+                    
+                    Spacer()
+                }
+                .offset(x: panelOffset)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            let translation = value.translation.width
+                            if isShowing {
+                                // Panel is open, only allow dragging left
+                                dragOffset = min(0, translation)
+                            } else {
+                                // Panel is closed, only allow dragging right
+                                dragOffset = max(0, translation)
+                            }
+                        }
+                        .onEnded { value in
+                            let translation = value.translation.width
+                            let velocity = value.velocity.width
+                            
+                            withAnimation(.spring()) {
+                                if isShowing {
+                                    // If swiping left with enough velocity or distance, close
+                                    if velocity < -500 || translation < -panelWidth * 0.3 {
+                                        isShowing = false
+                                    }
+                                } else {
+                                    // If swiping right with enough velocity or distance, open
+                                    if velocity > 500 || translation > 50 {
+                                        isShowing = true
+                                    }
+                                }
+                                dragOffset = 0
+                            }
+                        }
+                )
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environmentObject(cloud)
+        }
+    }
+    
+    private var panelOffset: CGFloat {
+        if isShowing {
+            return dragOffset
+        } else {
+            return -panelWidth + dragOffset
+        }
+    }
+    
+    private var backgroundOpacity: Double {
+        let progress: CGFloat
+        if isShowing {
+            progress = 1.0 + (dragOffset / panelWidth)
+        } else {
+            progress = dragOffset / panelWidth
+        }
+        return Double(max(0, min(0.5, progress * 0.5)))
+    }
+}
+
+// MARK: - Conversation Row for Side Panel
+struct ConversationRowForSidePanel: View {
+    let conv: Conversation
+    let selected: Bool
+    @EnvironmentObject private var cloud: CloudKitManager
+    @State private var showDeleteConfirmation = false
+    
+    var firstPrompt: String {
+        conv.messages.first(where: { $0.role == "user" })?.displayContent ?? "New conversation"
+    }
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(firstPrompt)
+                    .lineLimit(1)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                
+                Text(conv.lastUpdated, style: .relative)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            if selected {
+                Image(systemName: "checkmark")
+                    .foregroundColor(.black)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(selected ? Color(.systemGray5) : Color.clear)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(role: .destructive) {
+                showDeleteConfirmation = true
+            } label: {
+                Label("Delete Conversation", systemImage: "trash")
+            }
+        }
+        .confirmationDialog(
+            "Delete Conversation?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                // Haptic feedback
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.impactOccurred()
+                
+                cloud.deleteConversation(conv)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will permanently delete this conversation. This action cannot be undone.")
+        }
+    }
+}
+
+// MARK: - Modified ContentView
 struct ContentView: View {
     @EnvironmentObject private var cloud: CloudKitManager
     @StateObject private var transcriber = WhisperTranscriber()
     @StateObject private var downloadManager = ModelDownloadManager.shared
-    @StateObject private var tts = TTSManager.shared  // Add this
+    @StateObject private var tts = TTSManager.shared
     @State private var messageText = ""
-    @State private var showList = false
+    @State private var showSidePanel = false  // Changed from showList
     @FocusState private var isFocused: Bool
     @State private var showSettings = false
 
     var body: some View {
         NavigationView {
             ZStack {
+                // Main content
                 VStack(spacing: 0) {
                     if let conv = cloud.currentConversation {
                         MessagesView(conv: conv, waiting: cloud.isWaitingForResponse)
@@ -2395,10 +2614,20 @@ struct ContentView: View {
                             let verticalTranslation = value.translation.height
                             let horizontalTranslation = value.translation.width
                             let swipeDownwardThreshold: CGFloat = 50.0
+                            let swipeRightThreshold: CGFloat = 50.0
 
+                            // Swipe down to dismiss keyboard
                             if verticalTranslation > swipeDownwardThreshold &&
                                abs(verticalTranslation) > abs(horizontalTranslation) * 1.5 {
                                 isFocused = false
+                            }
+                            
+                            // Swipe right from left edge to show side panel
+                            if value.startLocation.x < 30 && // Started near left edge
+                               horizontalTranslation > swipeRightThreshold {
+                                withAnimation(.spring()) {
+                                    showSidePanel = true
+                                }
                             }
                         }
                 )
@@ -2427,7 +2656,11 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button { showList.toggle() } label: {
+                    Button {
+                        withAnimation(.spring()) {
+                            showSidePanel.toggle()
+                        }
+                    } label: {
                         Image("conversation-list")
                             .resizable()
                             .scaledToFit()
@@ -2452,10 +2685,12 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(isPresented: $showList) { ConversationList().environmentObject(cloud) }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(cloud)
-        }
+        .overlay(
+            // Side panel overlay
+            SidePanelOverlay(isShowing: $showSidePanel)
+                .environmentObject(cloud)
+                .edgesIgnoringSafeArea(.all)
+        )
         .alert("Error", isPresented: Binding(get: { cloud.errorMessage != nil }, set: { _ in cloud.errorMessage = nil })) {
             Button("OK", role: .cancel) { cloud.errorMessage = nil }
         } message: {
@@ -3417,122 +3652,7 @@ struct StatusOverlay: View {
     }
 }
 
-// MARK: List of conversations
-struct ConversationList: View {
-    @EnvironmentObject private var cloud: CloudKitManager
-    @Environment(\.dismiss) private var dismiss
-    @State private var showCacheSettings = false
-    @State private var showSettings = false
-    
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                // Custom header with settings
-                VStack(spacing: 16) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("History & Settings")
-                                .font(.title2)
-                                .bold()
-                                .padding(16)
-                        }
-                        
-                        Spacer()
-                        
-                        Button {
-                            showSettings = true
-                        } label: {
-                            Image("settings")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 26, height: 26)
-                                .padding(8)
-                                .background(Color(.systemGray6))
-                                .clipShape(Circle())
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                }
-                .background(Color(.systemBackground))
-                
-                Divider()
-                
-                // The list content
-                List {
-                    Section("Recent Conversations") {
-                        ForEach(cloud.conversations) { c in
-                            ConversationRow(conv: c, selected: c.id == cloud.currentConversation?.id)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    cloud.selectConversation(c)
-                                    dismiss()
-                                }
-                        }
-                        .onDelete { idx in
-                            idx.map { cloud.deleteConversation(cloud.conversations[$0]) }
-                        }
-                    }
-                    
-                    // Sync Status Section
-                    Section {
-                        if let last = cloud.lastSync {
-                            HStack {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundColor(.green)
-                                Text("Last synced")
-                                Spacer()
-                                Text(last, style: .relative)
-                                    .foregroundColor(.secondary)
-                            }
-                            .font(.caption)
-                        }
-                        
-                        if cloud.isOffline {
-                            HStack {
-                                Image(systemName: "wifi.slash")
-                                    .foregroundColor(.blue)
-                                Text("Offline - Using cached data")
-                                    .font(.caption)
-                            }
-                        }
-                        
-                        Button {
-                            showCacheSettings = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "internaldrive")
-                                Text("Cache: \(LocalCacheManager.shared.getCacheSizeString())")
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .foregroundColor(.primary)
-                    }
-                }
-                .listStyle(InsetGroupedListStyle())
-            }
-            .navigationBarHidden(true)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .refreshable {
-                await cloud.refreshConversations()
-            }
-            .sheet(isPresented: $showCacheSettings) {
-                CacheSettingsView()
-                    .environmentObject(cloud)
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView()
-                    .environmentObject(cloud)
-            }
-        }
-    }
-}
+
 
 struct CacheSettingsView: View {
     @EnvironmentObject private var cloud: CloudKitManager
