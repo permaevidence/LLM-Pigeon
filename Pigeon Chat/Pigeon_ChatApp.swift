@@ -154,6 +154,97 @@ struct Conversation: Codable, Identifiable {
     var lastUpdated: Date
 }
 
+
+struct LMStudioModelConfig: Codable, Identifiable {
+    let id: UUID
+    let name: String
+    let savedDate: Date
+    
+    // Regular parameters
+    let systemPrompt: String
+    let maxTokensEnabled: Bool
+    let maxTokensValue: Int
+    let temperatureEnabled: Bool
+    let temperatureValue: Double
+    let topPEnabled: Bool
+    let topPValue: Double
+    
+    // Thinking parameters
+    let thinkingSystemPrompt: String
+    let thinkingMaxTokensEnabled: Bool
+    let thinkingMaxTokensValue: Int
+    let thinkingTemperatureEnabled: Bool
+    let thinkingTemperatureValue: Double
+    let thinkingTopPEnabled: Bool
+    let thinkingTopPValue: Double
+    
+    // Custom init to ensure we always have a proper ID
+    init(id: UUID = UUID(), name: String, savedDate: Date, systemPrompt: String, maxTokensEnabled: Bool, maxTokensValue: Int, temperatureEnabled: Bool, temperatureValue: Double, topPEnabled: Bool, topPValue: Double, thinkingSystemPrompt: String, thinkingMaxTokensEnabled: Bool, thinkingMaxTokensValue: Int, thinkingTemperatureEnabled: Bool, thinkingTemperatureValue: Double, thinkingTopPEnabled: Bool, thinkingTopPValue: Double) {
+        self.id = id
+        self.name = name
+        self.savedDate = savedDate
+        self.systemPrompt = systemPrompt
+        self.maxTokensEnabled = maxTokensEnabled
+        self.maxTokensValue = maxTokensValue
+        self.temperatureEnabled = temperatureEnabled
+        self.temperatureValue = temperatureValue
+        self.topPEnabled = topPEnabled
+        self.topPValue = topPValue
+        self.thinkingSystemPrompt = thinkingSystemPrompt
+        self.thinkingMaxTokensEnabled = thinkingMaxTokensEnabled
+        self.thinkingMaxTokensValue = thinkingMaxTokensValue
+        self.thinkingTemperatureEnabled = thinkingTemperatureEnabled
+        self.thinkingTemperatureValue = thinkingTemperatureValue
+        self.thinkingTopPEnabled = thinkingTopPEnabled
+        self.thinkingTopPValue = thinkingTopPValue
+    }
+}
+
+struct OllamaModelConfig: Codable, Identifiable {
+    let id: UUID
+    let name: String
+    let savedDate: Date
+    
+    // Regular parameters
+    let systemPrompt: String
+    let maxTokensEnabled: Bool
+    let maxTokensValue: Int
+    let temperatureEnabled: Bool
+    let temperatureValue: Double
+    let topPEnabled: Bool
+    let topPValue: Double
+    
+    // Thinking parameters
+    let thinkingSystemPrompt: String
+    let thinkingMaxTokensEnabled: Bool
+    let thinkingMaxTokensValue: Int
+    let thinkingTemperatureEnabled: Bool
+    let thinkingTemperatureValue: Double
+    let thinkingTopPEnabled: Bool
+    let thinkingTopPValue: Double
+    
+    // Custom init to ensure we always have a proper ID
+    init(id: UUID = UUID(), name: String, savedDate: Date, systemPrompt: String, maxTokensEnabled: Bool, maxTokensValue: Int, temperatureEnabled: Bool, temperatureValue: Double, topPEnabled: Bool, topPValue: Double, thinkingSystemPrompt: String, thinkingMaxTokensEnabled: Bool, thinkingMaxTokensValue: Int, thinkingTemperatureEnabled: Bool, thinkingTemperatureValue: Double, thinkingTopPEnabled: Bool, thinkingTopPValue: Double) {
+        self.id = id
+        self.name = name
+        self.savedDate = savedDate
+        self.systemPrompt = systemPrompt
+        self.maxTokensEnabled = maxTokensEnabled
+        self.maxTokensValue = maxTokensValue
+        self.temperatureEnabled = temperatureEnabled
+        self.temperatureValue = temperatureValue
+        self.topPEnabled = topPEnabled
+        self.topPValue = topPValue
+        self.thinkingSystemPrompt = thinkingSystemPrompt
+        self.thinkingMaxTokensEnabled = thinkingMaxTokensEnabled
+        self.thinkingMaxTokensValue = thinkingMaxTokensValue
+        self.thinkingTemperatureEnabled = thinkingTemperatureEnabled
+        self.thinkingTemperatureValue = thinkingTemperatureValue
+        self.thinkingTopPEnabled = thinkingTopPEnabled
+        self.thinkingTopPValue = thinkingTopPValue
+    }
+}
+
 // MARK: - CloudKit Manager
 @MainActor
 final class CloudKitManager: NSObject, ObservableObject {
@@ -253,7 +344,12 @@ final class CloudKitManager: NSObject, ObservableObject {
     @AppStorage("ollamaThinkingTopPValue") var ollamaThinkingTopPValue: Double = 0.95
     @AppStorage("ollamaModelName") var ollamaModelName: String = "add model in settings"
     
+    
     @AppStorage("transcriptionEnabled") var transcriptionEnabled: Bool = true
+    @AppStorage("webScrapingTokenBudget") var webScrapingTokenBudget: Int = 6400
+    
+    @AppStorage("savedLMStudioConfigs") var savedLMStudioConfigsData: Data = Data()
+    @AppStorage("savedOllamaConfigs") var savedOllamaConfigsData: Data = Data()
 
     // MARK: Private properties
     private static let containerID = "iCloud.com.pigeonchat.pigeonchat"
@@ -284,6 +380,48 @@ final class CloudKitManager: NSObject, ObservableObject {
                    ollamaThinkingMaxTokensEnabled ||
                    ollamaThinkingTemperatureEnabled ||
                    ollamaThinkingTopPEnabled
+        }
+    }
+    
+    var savedLMStudioConfigs: [LMStudioModelConfig] {
+        get {
+            guard let configs = try? JSONDecoder().decode([LMStudioModelConfig].self, from: savedLMStudioConfigsData) else {
+                return []
+            }
+            return configs
+        }
+        set {
+            savedLMStudioConfigsData = (try? JSONEncoder().encode(newValue)) ?? Data()
+        }
+    }
+
+    var savedOllamaConfigs: [OllamaModelConfig] {
+        get {
+            guard let configs = try? JSONDecoder().decode([OllamaModelConfig].self, from: savedOllamaConfigsData) else {
+                return []
+            }
+            return configs
+        }
+        set {
+            savedOllamaConfigsData = (try? JSONEncoder().encode(newValue)) ?? Data()
+        }
+    }
+    
+    var webScrapingMaxChars: Int {
+        get {
+            // Tokens after overhead
+            let tokensForChunks = max(0, Double(webScrapingTokenBudget - 1_000))
+            // Four chunks → tokens per chunk
+            let tokensPerChunk  = tokensForChunks / 4.0
+            // Convert to characters
+            return Int(tokensPerChunk * 3.7)
+        }
+        set {
+            // Characters → tokens per chunk
+            let tokensPerChunk  = Double(newValue) / 3.7
+            let tokensForChunks = tokensPerChunk * 4.0
+            // Re‑apply overhead and round sensibly
+            webScrapingTokenBudget = Int(tokensForChunks.rounded()) + 1_000
         }
     }
     
@@ -520,12 +658,15 @@ final class CloudKitManager: NSObject, ObservableObject {
 
     func selectConversation(_ conv: Conversation) {
         print("[iOS] Selecting conversation \(conv.id.prefix(8))")
-        
-        // Clear any stuck generating state when switching conversations
+
+        // Stop polling the old one to avoid interleaved fetches
+        stopPolling()
+
+        // Clear stuck generating state from another thread
         if serverGeneratingConversationId != nil && serverGeneratingConversationId != conv.id {
             clearGeneratingState()
         }
-        
+
         currentConversation = conv
         Task { await fetchConversation(id: conv.id) }
     }
@@ -566,11 +707,19 @@ final class CloudKitManager: NSObject, ObservableObject {
         // First, load from cache for immediate UI update
         let cachedConversations = LocalCacheManager.shared.loadAllConversations()
         if !cachedConversations.isEmpty {
+            // Remember which convo was selected before we overwrite the array
+            let selectedID = currentConversation?.id
+
             conversations = cachedConversations
             hasCachedData = true
-            if currentConversation == nil || !conversations.contains(where: { $0.id == currentConversation?.id }) {
+
+            // Restore the same selected convo if it still exists; otherwise pick first
+            if let sid = selectedID, let updated = conversations.first(where: { $0.id == sid }) {
+                currentConversation = updated
+            } else if currentConversation == nil {
                 currentConversation = conversations.first
             }
+
             print("[iOS] Loaded \(cachedConversations.count) conversations from cache")
         }
         
@@ -642,20 +791,34 @@ final class CloudKitManager: NSObject, ObservableObject {
             }
 
             // Step 4: Determine which local records to delete.
-            let idsToDeleteLocally = localIDs
+            // ⚠️  Step 4: Only delete after we confirm the server really removed the record
+            let idsPossiblyDeleted = localIDs
                 .subtracting(serverIDs)
                 .filter { id in
                     guard let meta = localCacheMetadata.conversations[id] else { return false }
-                    return meta.recordChangeTag != nil          // keep never-synced locals
+                    return meta.recordChangeTag != nil        // never delete purely‑local drafts
                 }
-            if !idsToDeleteLocally.isEmpty {
-                print("[iOS] Deleting \(idsToDeleteLocally.count) local conversations that are no longer on the server.")
-                for id in idsToDeleteLocally {
+
+            for id in idsPossiblyDeleted {
+                // ‑‑ OPTIONAL: skip very recent saves to give CloudKit index time to catch up
+                if let meta = localCacheMetadata.conversations[id],
+                   Date().timeIntervalSince(meta.lastModified) < 5 { continue }   // 5 s grace
+
+                do {
+                    _ = try await privateDB.record(for: CKRecord.ID(recordName: id))
+                    // ➜ The record *still exists* on the server – keep local copy.
+                    continue
+                } catch let ckErr as CKError where ckErr.code == .unknownItem {
+                    // ➜ Confirmed deleted on server – now remove from cache & UI.
+                    print("[iOS] Confirmed deletion of \(id.prefix(8)); pruning locally.")
                     LocalCacheManager.shared.deleteConversation(id: id)
                     conversations.removeAll { $0.id == id }
                     if currentConversation?.id == id {
-                        currentConversation = nil // Will be set to the first one later
+                        currentConversation = nil                        // will reset later
                     }
+                } catch {
+                    // Network / transient error – keep local copy for now, try next sync.
+                    print("[iOS] Could not confirm deletion for \(id.prefix(8)): \(error)")
                 }
             }
 
@@ -679,6 +842,50 @@ final class CloudKitManager: NSObject, ObservableObject {
             print("[iOS] Major error during sync: \(error.localizedDescription)")
             errorMessage = "Sync failed: \(error.localizedDescription)"
         }
+    }
+    
+    func loadLMStudioConfig(_ config: LMStudioModelConfig) {
+        lmstudioModelName = config.name
+        
+        // Load regular parameters
+        lmstudioSystemPrompt = config.systemPrompt
+        lmstudioMaxTokensEnabled = config.maxTokensEnabled
+        lmstudioMaxTokensValue = config.maxTokensValue
+        lmstudioTemperatureEnabled = config.temperatureEnabled
+        lmstudioTemperatureValue = config.temperatureValue
+        lmstudioTopPEnabled = config.topPEnabled
+        lmstudioTopPValue = config.topPValue
+        
+        // Load thinking parameters
+        lmstudioThinkingSystemPrompt = config.thinkingSystemPrompt
+        lmstudioThinkingMaxTokensEnabled = config.thinkingMaxTokensEnabled
+        lmstudioThinkingMaxTokensValue = config.thinkingMaxTokensValue
+        lmstudioThinkingTemperatureEnabled = config.thinkingTemperatureEnabled
+        lmstudioThinkingTemperatureValue = config.thinkingTemperatureValue
+        lmstudioThinkingTopPEnabled = config.thinkingTopPEnabled
+        lmstudioThinkingTopPValue = config.thinkingTopPValue
+    }
+
+    func loadOllamaConfig(_ config: OllamaModelConfig) {
+        ollamaModelName = config.name
+        
+        // Load regular parameters
+        ollamaSystemPrompt = config.systemPrompt
+        ollamaMaxTokensEnabled = config.maxTokensEnabled
+        ollamaMaxTokensValue = config.maxTokensValue
+        ollamaTemperatureEnabled = config.temperatureEnabled
+        ollamaTemperatureValue = config.temperatureValue
+        ollamaTopPEnabled = config.topPEnabled
+        ollamaTopPValue = config.topPValue
+        
+        // Load thinking parameters
+        ollamaThinkingSystemPrompt = config.thinkingSystemPrompt
+        ollamaThinkingMaxTokensEnabled = config.thinkingMaxTokensEnabled
+        ollamaThinkingMaxTokensValue = config.thinkingMaxTokensValue
+        ollamaThinkingTemperatureEnabled = config.thinkingTemperatureEnabled
+        ollamaThinkingTemperatureValue = config.thinkingTemperatureValue
+        ollamaThinkingTopPEnabled = config.thinkingTopPEnabled
+        ollamaThinkingTopPValue = config.thinkingTopPValue
     }
 
     func requestStopGeneration() {
@@ -918,6 +1125,7 @@ final class CloudKitManager: NSObject, ObservableObject {
             
             // Save web search preference
             recordToSave["enableWebSearch"] = (enableWebSearch ? 1 : 0) as CKRecordValue
+            recordToSave["webScrapingMaxChars"] = webScrapingMaxChars as CKRecordValue
             
             // Save model selection
             recordToSave["selectedModelId"] = selectedModelId as CKRecordValue
@@ -1035,12 +1243,20 @@ final class CloudKitManager: NSObject, ObservableObject {
         }
 
     private func upsertLocally(_ conv: Conversation) {
+        let selectedID = currentConversation?.id
+
         if let idx = conversations.firstIndex(where: { $0.id == conv.id }) {
             conversations[idx] = conv
         } else {
             conversations.insert(conv, at: 0)
         }
+
         conversations.sort { $0.lastUpdated > $1.lastUpdated }
+
+        // Restore selection object after sort so SwiftUI doesn’t jump
+        if let sid = selectedID, let updated = conversations.first(where: { $0.id == sid }) {
+            currentConversation = updated
+        }
     }
 
     // MARK: - Polling
@@ -1105,12 +1321,8 @@ final class CloudKitManager: NSObject, ObservableObject {
     // MARK: - Remote Notifications
     func handleRemoteNotification(_ userInfo: [AnyHashable: Any]) {
         print("[iOS] Received remote notification.")
-        guard let notification = CKNotification(fromRemoteNotificationDictionary: userInfo) else {
-            print("[iOS] Failed to parse CKNotification from userInfo.")
-            return
-        }
-
-        guard notification.subscriptionID == iOSConversationSubscriptionID,
+        guard let notification = CKNotification(fromRemoteNotificationDictionary: userInfo),
+              notification.subscriptionID == iOSConversationSubscriptionID,
               let queryNotification = notification as? CKQueryNotification,
               let recordID = queryNotification.recordID else {
             print("[iOS] Notification is not for our subscription.")
@@ -1118,15 +1330,10 @@ final class CloudKitManager: NSObject, ObservableObject {
         }
 
         print("[iOS] Handling notification for record: \(recordID.recordName.prefix(8))")
-        
         Task {
-            if recordID.recordName == currentConversation?.id {
-                print("[iOS] Notification for current conversation.")
-                await fetchConversation(id: recordID.recordName)
-            } else {
-                print("[iOS] Notification for non-current conversation.")
-            }
-            await loadConversationsWithCache()
+            // Just fetch and upsert that single conversation.
+            await self.fetchConversation(id: recordID.recordName)
+            // DO NOT call loadConversationsWithCache() here.
         }
     }
 
@@ -1157,6 +1364,409 @@ extension CloudKitManager: UNUserNotificationCenterDelegate {
         print("[iOS] UNUserNotificationCenter didReceive response")
         let userInfo = response.notification.request.content.userInfo
         handleRemoteNotification(userInfo)
+    }
+}
+
+
+// LMStudio Model Configuration View
+struct LMStudioModelNameView: View {
+    @EnvironmentObject private var cloud: CloudKitManager
+    @FocusState private var isTextFieldFocused: Bool
+    @State private var tempModelName = ""
+    @State private var showingOverwriteAlert = false
+    @State private var configToOverwrite: LMStudioModelConfig?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            
+            HStack(spacing: 8) {
+                // Dropdown menu button
+                Menu {
+                    if cloud.savedLMStudioConfigs.isEmpty {
+                        Text("No saved configurations")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(cloud.savedLMStudioConfigs.sorted(by: { $0.name < $1.name })) { config in
+                            Button {
+                                cloud.loadLMStudioConfig(config)
+                                tempModelName = config.name
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(config.name)
+                                        .font(.body)
+                                    Text("Saved \(config.savedDate.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        // Delete section
+                        Section("Delete Configurations") {
+                            ForEach(cloud.savedLMStudioConfigs.sorted(by: { $0.name < $1.name })) { config in
+                                Button(role: .destructive) {
+                                    deleteConfig(config)
+                                } label: {
+                                    HStack {
+                                        Text(config.name)
+                                        Spacer()
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "tray.full.fill")
+                        .foregroundColor(.accentColor)
+                        .imageScale(.large)
+                }
+                .menuStyle(.borderlessButton)
+                
+                // Text field
+                TextField("e.g., my-local-model", text: $tempModelName)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isTextFieldFocused)
+                    .submitLabel(.done)
+                    .onAppear {
+                        tempModelName = cloud.lmstudioModelName
+                    }
+                    .onChange(of: tempModelName) { _, newValue in
+                        cloud.lmstudioModelName = newValue
+                    }
+                
+                // Save button
+                Button {
+                    saveCurrentConfig()
+                } label: {
+                    Text("Save")
+                        .font(.caption)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                            .fill(saveButtonDisabled ? Color.gray.opacity(0.3) : Color.accentColor)
+                    )
+                    .foregroundColor(saveButtonDisabled ? .gray : .white)
+                }
+                .buttonStyle(.borderless)
+                .disabled(saveButtonDisabled)
+            }
+            
+            if !cloud.savedLMStudioConfigs.isEmpty {
+                Text("Saved configurations: \(cloud.savedLMStudioConfigs.count)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.bottom, 8)
+        .alert("Overwrite Configuration?", isPresented: $showingOverwriteAlert, presenting: configToOverwrite) { config in
+            Button("Cancel", role: .cancel) { }
+            Button("Overwrite", role: .destructive) {
+                if let config = configToOverwrite {
+                    overwriteConfig(config)
+                }
+            }
+        } message: { config in
+            Text("A configuration named '\(config.name)' already exists. Do you want to overwrite it with the current settings?")
+        }
+    }
+    
+    private var saveButtonDisabled: Bool {
+        tempModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    
+    private func saveCurrentConfig() {
+        let trimmedName = tempModelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+        
+        // Check if config with this name already exists
+        if let existingConfig = cloud.savedLMStudioConfigs.first(where: { $0.name == trimmedName }) {
+            configToOverwrite = existingConfig
+            showingOverwriteAlert = true
+            return
+        }
+        
+        createNewConfig(name: trimmedName)
+    }
+    
+    private func createNewConfig(name: String) {
+        let config = LMStudioModelConfig(
+            name: name,
+            savedDate: Date(),
+            systemPrompt: cloud.lmstudioSystemPrompt,
+            maxTokensEnabled: cloud.lmstudioMaxTokensEnabled,
+            maxTokensValue: cloud.lmstudioMaxTokensValue,
+            temperatureEnabled: cloud.lmstudioTemperatureEnabled,
+            temperatureValue: cloud.lmstudioTemperatureValue,
+            topPEnabled: cloud.lmstudioTopPEnabled,
+            topPValue: cloud.lmstudioTopPValue,
+            thinkingSystemPrompt: cloud.lmstudioThinkingSystemPrompt,
+            thinkingMaxTokensEnabled: cloud.lmstudioThinkingMaxTokensEnabled,
+            thinkingMaxTokensValue: cloud.lmstudioThinkingMaxTokensValue,
+            thinkingTemperatureEnabled: cloud.lmstudioThinkingTemperatureEnabled,
+            thinkingTemperatureValue: cloud.lmstudioThinkingTemperatureValue,
+            thinkingTopPEnabled: cloud.lmstudioThinkingTopPEnabled,
+            thinkingTopPValue: cloud.lmstudioThinkingTopPValue
+        )
+        
+        var configs = cloud.savedLMStudioConfigs
+        configs.append(config)
+        cloud.savedLMStudioConfigs = configs
+        
+        // Haptic feedback
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
+    }
+
+    private func overwriteConfig(_ oldConfig: LMStudioModelConfig) {
+        var configs = cloud.savedLMStudioConfigs
+        
+        // Find the index of the config to replace
+        if let index = configs.firstIndex(where: { $0.name == oldConfig.name }) {
+            // Create new config with the same ID to maintain continuity
+            let newConfig = LMStudioModelConfig(
+                id: configs[index].id,  // Keep the same ID
+                name: oldConfig.name,
+                savedDate: Date(),
+                systemPrompt: cloud.lmstudioSystemPrompt,
+                maxTokensEnabled: cloud.lmstudioMaxTokensEnabled,
+                maxTokensValue: cloud.lmstudioMaxTokensValue,
+                temperatureEnabled: cloud.lmstudioTemperatureEnabled,
+                temperatureValue: cloud.lmstudioTemperatureValue,
+                topPEnabled: cloud.lmstudioTopPEnabled,
+                topPValue: cloud.lmstudioTopPValue,
+                thinkingSystemPrompt: cloud.lmstudioThinkingSystemPrompt,
+                thinkingMaxTokensEnabled: cloud.lmstudioThinkingMaxTokensEnabled,
+                thinkingMaxTokensValue: cloud.lmstudioThinkingMaxTokensValue,
+                thinkingTemperatureEnabled: cloud.lmstudioThinkingTemperatureEnabled,
+                thinkingTemperatureValue: cloud.lmstudioThinkingTemperatureValue,
+                thinkingTopPEnabled: cloud.lmstudioThinkingTopPEnabled,
+                thinkingTopPValue: cloud.lmstudioThinkingTopPValue
+            )
+            
+            // Replace at the same index
+            configs[index] = newConfig
+            cloud.savedLMStudioConfigs = configs
+            
+            // Haptic feedback
+            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+            impactFeedback.impactOccurred()
+        }
+    }
+    
+    private func deleteConfig(_ config: LMStudioModelConfig) {
+        var configs = cloud.savedLMStudioConfigs
+        configs.removeAll { $0.id == config.id }
+        cloud.savedLMStudioConfigs = configs
+        
+        // Haptic feedback
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
+    }
+}
+
+// Ollama Model Configuration View
+struct OllamaModelNameView: View {
+    @EnvironmentObject private var cloud: CloudKitManager
+    @FocusState private var isTextFieldFocused: Bool
+    @State private var tempModelName = ""
+    @State private var showingOverwriteAlert = false
+    @State private var configToOverwrite: OllamaModelConfig?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            
+            HStack(spacing: 8) {
+                // Dropdown menu button
+                Menu {
+                    if cloud.savedOllamaConfigs.isEmpty {
+                        Text("No saved configurations")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(cloud.savedOllamaConfigs.sorted(by: { $0.name < $1.name })) { config in
+                            Button {
+                                cloud.loadOllamaConfig(config)
+                                tempModelName = config.name
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(config.name)
+                                        .font(.body)
+                                    Text("Saved \(config.savedDate.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        // Delete section
+                        Section("Delete Configurations") {
+                            ForEach(cloud.savedOllamaConfigs.sorted(by: { $0.name < $1.name })) { config in
+                                Button(role: .destructive) {
+                                    deleteConfig(config)
+                                } label: {
+                                    HStack {
+                                        Text(config.name)
+                                        Spacer()
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "tray.full.fill")
+                        .foregroundColor(.accentColor)
+                        .imageScale(.large)
+                }
+                .menuStyle(.borderlessButton)
+                
+                // Text field
+                TextField("e.g., llama3-instruct", text: $tempModelName)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isTextFieldFocused)
+                    .submitLabel(.done)
+                    .onAppear {
+                        tempModelName = cloud.ollamaModelName
+                    }
+                    .onChange(of: tempModelName) { _, newValue in
+                        cloud.ollamaModelName = newValue
+                    }
+                
+                // Save button
+                Button {
+                    saveCurrentConfig()
+                } label: {
+                    Text("Save")
+                        .font(.caption)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                            .fill(saveButtonDisabled ? Color.gray.opacity(0.3) : Color.accentColor)
+                    )
+                    .foregroundColor(saveButtonDisabled ? .gray : .white)
+                }
+                .buttonStyle(.borderless)
+                .disabled(saveButtonDisabled)
+            }
+            
+            if !cloud.savedOllamaConfigs.isEmpty {
+                Text("Saved configurations: \(cloud.savedOllamaConfigs.count)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.bottom, 8)
+        .alert("Overwrite Configuration?", isPresented: $showingOverwriteAlert, presenting: configToOverwrite) { config in
+            Button("Cancel", role: .cancel) { }
+            Button("Overwrite", role: .destructive) {
+                if let config = configToOverwrite {
+                    overwriteConfig(config)
+                }
+            }
+        } message: { config in
+            Text("A configuration named '\(config.name)' already exists. Do you want to overwrite it with the current settings?")
+        }
+    }
+    
+    private var saveButtonDisabled: Bool {
+        tempModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    
+    private func saveCurrentConfig() {
+        let trimmedName = tempModelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+        
+        // Check if config with this name already exists
+        if let existingConfig = cloud.savedOllamaConfigs.first(where: { $0.name == trimmedName }) {
+            configToOverwrite = existingConfig
+            showingOverwriteAlert = true
+            return
+        }
+        
+        createNewConfig(name: trimmedName)
+    }
+    
+    private func createNewConfig(name: String) {
+        let config = OllamaModelConfig(
+            name: name,
+            savedDate: Date(),
+            systemPrompt: cloud.ollamaSystemPrompt,
+            maxTokensEnabled: cloud.ollamaMaxTokensEnabled,
+            maxTokensValue: cloud.ollamaMaxTokensValue,
+            temperatureEnabled: cloud.ollamaTemperatureEnabled,
+            temperatureValue: cloud.ollamaTemperatureValue,
+            topPEnabled: cloud.ollamaTopPEnabled,
+            topPValue: cloud.ollamaTopPValue,
+            thinkingSystemPrompt: cloud.ollamaThinkingSystemPrompt,
+            thinkingMaxTokensEnabled: cloud.ollamaThinkingMaxTokensEnabled,
+            thinkingMaxTokensValue: cloud.ollamaThinkingMaxTokensValue,
+            thinkingTemperatureEnabled: cloud.ollamaThinkingTemperatureEnabled,
+            thinkingTemperatureValue: cloud.ollamaThinkingTemperatureValue,
+            thinkingTopPEnabled: cloud.ollamaThinkingTopPEnabled,
+            thinkingTopPValue: cloud.ollamaThinkingTopPValue
+        )
+        
+        var configs = cloud.savedOllamaConfigs
+        configs.append(config)
+        cloud.savedOllamaConfigs = configs
+        
+        // Haptic feedback
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
+    }
+
+    private func overwriteConfig(_ oldConfig: OllamaModelConfig) {
+        var configs = cloud.savedOllamaConfigs
+        
+        // Find the index of the config to replace
+        if let index = configs.firstIndex(where: { $0.name == oldConfig.name }) {
+            // Create new config with the same ID to maintain continuity
+            let newConfig = OllamaModelConfig(
+                id: configs[index].id,  // Keep the same ID
+                name: oldConfig.name,
+                savedDate: Date(),
+                systemPrompt: cloud.ollamaSystemPrompt,
+                maxTokensEnabled: cloud.ollamaMaxTokensEnabled,
+                maxTokensValue: cloud.ollamaMaxTokensValue,
+                temperatureEnabled: cloud.ollamaTemperatureEnabled,
+                temperatureValue: cloud.ollamaTemperatureValue,
+                topPEnabled: cloud.ollamaTopPEnabled,
+                topPValue: cloud.ollamaTopPValue,
+                thinkingSystemPrompt: cloud.ollamaThinkingSystemPrompt,
+                thinkingMaxTokensEnabled: cloud.ollamaThinkingMaxTokensEnabled,
+                thinkingMaxTokensValue: cloud.ollamaThinkingMaxTokensValue,
+                thinkingTemperatureEnabled: cloud.ollamaThinkingTemperatureEnabled,
+                thinkingTemperatureValue: cloud.ollamaThinkingTemperatureValue,
+                thinkingTopPEnabled: cloud.ollamaThinkingTopPEnabled,
+                thinkingTopPValue: cloud.ollamaThinkingTopPValue
+            )
+            
+            // Replace at the same index
+            configs[index] = newConfig
+            cloud.savedOllamaConfigs = configs
+            
+            // Haptic feedback
+            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+            impactFeedback.impactOccurred()
+        }
+    }
+    
+    private func deleteConfig(_ config: OllamaModelConfig) {
+        var configs = cloud.savedOllamaConfigs
+        configs.removeAll { $0.id == config.id }
+        cloud.savedOllamaConfigs = configs
+        
+        // Haptic feedback
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
     }
 }
 
@@ -1300,47 +1910,96 @@ final class AttachmentManager: ObservableObject {
 
 struct ModelSelectorView: View {
     @EnvironmentObject private var cloud: CloudKitManager
-
-    /// (Optional) keep provider grouping for a tidy menu
-    private var grouped: [(provider: ModelProvider, models: [ModelOption])] {
-        Dictionary(grouping: ModelOption.allOptions, by: \.provider)
-            .sorted { $0.key.rawValue < $1.key.rawValue }
-            .map { ($0.key, $0.value) }
+    
+    /// Only the built-in models are hard-coded; external ones come from the user’s
+    /// saved configs so the list can grow dynamically.
+    private var builtInModels: [ModelOption] {
+        ModelOption.allOptions.filter { $0.provider == .builtIn }
     }
-
+    
     var body: some View {
-            Menu {
-                ForEach(grouped, id: \.provider) { group in
-                    Text(group.provider.displayName)
-                        .font(.caption)
+        Menu {
+            // ───────────────  Built-in  ───────────────
+            Group {
+                Text("Built-in")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .disabled(true)
+                
+                ForEach(builtInModels) { option in
+                    Button {
+                        cloud.selectedModelId = option.id                // e.g. “qwen3-8b”
+                    } label: {
+                        Label(option.displayName,
+                              systemImage: cloud.selectedModelId == option.id ? "checkmark" : "")
+                    }
+                }
+            }
+            
+            // ───────────────  LM Studio  ───────────────
+            Divider()
+            Group {
+                Text("LM Studio")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .disabled(true)
+                
+                if cloud.savedLMStudioConfigs.isEmpty {
+                    Text("No saved models")
                         .foregroundColor(.secondary)
                         .disabled(true)
-
-                    ForEach(group.models) { option in
+                } else {
+                    ForEach(cloud.savedLMStudioConfigs.sorted(by: { $0.name < $1.name })) { cfg in
+                        let isSelected = cloud.selectedModelId == "lmstudio"
+                                      && cloud.lmstudioModelName == cfg.name
                         Button {
-                            cloud.selectedModelId = option.id
+                            cloud.selectedModelId = "lmstudio"          // keep generic ID
+                            cloud.loadLMStudioConfig(cfg)               // load all params
                         } label: {
-                            Label(
-                                cloud.displayName(for: option),   // ← uses helper
-                                systemImage: cloud.selectedModelId == option.id ? "checkmark" : ""
-                            )
+                            Label(cfg.name,
+                                  systemImage: isSelected ? "checkmark" : "")
                         }
                     }
-
-                    if group.provider != grouped.last?.provider { Divider() }
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(cloud.currentDisplayName)              // ← uses helper
-                        .font(.system(size: 16, weight: .medium))
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 12))
-                }
-                .foregroundColor(.primary)
             }
-            .menuStyle(.automatic)
+            
+            // ───────────────  Ollama  ───────────────
+            Divider()
+            Group {
+                Text("Ollama")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .disabled(true)
+                
+                if cloud.savedOllamaConfigs.isEmpty {
+                    Text("No saved models")
+                        .foregroundColor(.secondary)
+                        .disabled(true)
+                } else {
+                    ForEach(cloud.savedOllamaConfigs.sorted(by: { $0.name < $1.name })) { cfg in
+                        let isSelected = cloud.selectedModelId == "ollama"
+                                      && cloud.ollamaModelName == cfg.name
+                        Button {
+                            cloud.selectedModelId = "ollama"
+                            cloud.loadOllamaConfig(cfg)
+                        } label: {
+                            Label(cfg.name,
+                                  systemImage: isSelected ? "checkmark" : "")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(cloud.currentDisplayName)          // already shows the saved model name
+                    .font(.system(size: 16, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12))
+            }
+            .foregroundColor(.primary)
         }
     }
+}
 
 
 struct SettingsView: View {
@@ -1412,6 +2071,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section {
                 // Built-in Model Settings Section
                 DisclosureGroup(
                     isExpanded: $builtInExpanded,
@@ -1431,22 +2091,16 @@ struct SettingsView: View {
                             .labelStyle(.titleOnly)
                     }
                 )
+                }
                 
-                
+                Section {
                 // LM Studio Settings Section
                 DisclosureGroup(
                     isExpanded: $lmStudioExpanded,
                     content: {
                         // Model Name - FIRST (above everything)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Model Name")
-                                .bold()
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            TextField("e.g., local-model", text: $cloud.lmstudioModelName)
-                                .textFieldStyle(.roundedBorder)
-                                .focused($focusedField, equals: .lmstudioModelName)
-                                .submitLabel(.done)
-                        }
+                        LMStudioModelNameView()
+                            .environmentObject(cloud)
                         .padding(.bottom, 8)
                         
                         // Regular ↔︎ Thinking switch - SECOND
@@ -1466,22 +2120,16 @@ struct SettingsView: View {
                             .labelStyle(.titleOnly)
                     }
                 )
+                }
                 
-                
+                Section {
                 // Ollama Settings Section
                 DisclosureGroup(
                     isExpanded: $ollamaExpanded,
                     content: {
                         // Model Name - FIRST (above everything)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Model Name")
-                                .bold()
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            TextField("e.g., llama3", text: $cloud.ollamaModelName)
-                                .textFieldStyle(.roundedBorder)
-                                .focused($focusedField, equals: .ollamaModelName)
-                                .submitLabel(.done)
-                        }
+                        OllamaModelNameView()
+                            .environmentObject(cloud)
                         .padding(.bottom, 8)
                         
                         // Regular ↔︎ Thinking switch - SECOND
@@ -1501,6 +2149,7 @@ struct SettingsView: View {
                             .labelStyle(.titleOnly)
                     }
                 )
+                }
                 
                 // Transcription Settings Section
                 Section {
@@ -1509,6 +2158,52 @@ struct SettingsView: View {
                     Text("Voice Input")
                 } footer: {
                     Text("When disabled, voice transcription features will be hidden and no model downloads will be prompted.")
+                        .font(.caption)
+                }
+                
+                // Web Scraping Settings Section
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Web Search Token Budget")
+                                .bold()
+                            Spacer()
+                            Text("≈ \(cloud.webScrapingTokenBudget) tokens")
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Slider(
+                            value: Binding(
+                                get: { Double(cloud.webScrapingTokenBudget) },
+                                set: { cloud.webScrapingTokenBudget = Int($0) }
+                            ),
+                            in: 2000...16000,
+                            step: 100
+                        )
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Allocates tokens for web search operations")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Text("≈ 1,000 tokens: search results snippets overhead")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            
+                            Text("≈ \(cloud.webScrapingTokenBudget - 1_000) tokens available for RAG context")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+
+                            Text("• \(cloud.webScrapingMaxChars) characters × 4 chunks")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .italic()
+                        }
+                    }
+                } header: {
+                    Text("Web Search")
+                } footer: {
+                    Text("Total token budget for web search. Higher values extract more content from the top 3 URLs but may slow responses.")
                         .font(.caption)
                 }
                 
@@ -1577,7 +2272,9 @@ struct SettingsView: View {
         // System Prompt
         VStack(alignment: .leading, spacing: 8) {
             Text("Thinking System Prompt")
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .bold()
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .center)
             TextField("System prompt for thinking mode", text: $cloud.thinkingSystemPrompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...10)
@@ -1589,10 +2286,12 @@ struct SettingsView: View {
         HStack {
             Text("Context Length")
                 .bold()
+                .font(.caption)
                 .frame(width: 120, alignment: .leading)
+            Spacer()
             TextField("Context", text: $thinkingContextLengthText)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 100)
+                .frame(width: 80)
                 .keyboardType(.numberPad)
                 .focused($focusedField, equals: .thinkingContextLength)
                 .onAppear {
@@ -1606,9 +2305,6 @@ struct SettingsView: View {
                 .onSubmit {
                     validateThinkingContextLength()
                 }
-            Text("tokens")
-                .font(.caption)
-                .foregroundColor(.secondary)
         }
         
         // Temperature
@@ -1616,22 +2312,25 @@ struct SettingsView: View {
             HStack {
                 Text("Temperature")
                     .bold()
-                    .frame(width: 120, alignment: .leading)
+                    .font(.caption)
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $cloud.thinkingTemperatureValue, in: 0...2, step: 0.05)
                 Text(String(format: "%.2f", cloud.thinkingTemperatureValue))
-                    .frame(width: 50, alignment: .trailing)
+                    .frame(width: 35, alignment: .trailing)
                     .foregroundColor(.secondary)
             }
-            Slider(value: $cloud.thinkingTemperatureValue, in: 0...2, step: 0.05)
         }
         
         // Top-K
         HStack {
             Text("Top-K")
                 .bold()
-                .frame(width: 120, alignment: .leading)
+                .font(.caption)
+                .frame(width: 80, alignment: .leading)
+            Spacer()
             TextField("Top-K", text: $thinkingTopKText)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 100)
+                .frame(width: 80)
                 .keyboardType(.numberPad)
                 .focused($focusedField, equals: .thinkingTopK)
                 .onAppear {
@@ -1652,12 +2351,13 @@ struct SettingsView: View {
             HStack {
                 Text("Top-P")
                     .bold()
-                    .frame(width: 120, alignment: .leading)
+                    .font(.caption)
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $cloud.thinkingTopPValue, in: 0...1, step: 0.01)
                 Text(String(format: "%.2f", cloud.thinkingTopPValue))
-                    .frame(width: 50, alignment: .trailing)
+                    .frame(width: 35, alignment: .trailing)
                     .foregroundColor(.secondary)
             }
-            Slider(value: $cloud.thinkingTopPValue, in: 0...1, step: 0.01)
         }
         
         // Reset to Defaults Button
@@ -1681,7 +2381,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("System Prompt")
                     .bold()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 TextField("System prompt", text: $cloud.builtInSystemPrompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...10)
@@ -1693,10 +2394,12 @@ struct SettingsView: View {
             HStack {
                 Text("Context Length")
                     .bold()
+                    .font(.caption)
                     .frame(width: 120, alignment: .leading)
+                Spacer()
                 TextField("Context", text: $contextLengthText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 100)
+                    .frame(width: 80)
                     .keyboardType(.numberPad)
                     .focused($focusedField, equals: .contextLength)
                     .onAppear {
@@ -1710,9 +2413,6 @@ struct SettingsView: View {
                     .onSubmit {
                         validateContextLength()
                     }
-                Text("tokens")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
             
             // Temperature
@@ -1720,22 +2420,25 @@ struct SettingsView: View {
                 HStack {
                     Text("Temperature")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.builtInTemperatureValue, in: 0...2, step: 0.05)
                     Text(String(format: "%.2f", cloud.builtInTemperatureValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.builtInTemperatureValue, in: 0...2, step: 0.05)
             }
             
             // Top-K
             HStack {
                 Text("Top-K")
                     .bold()
-                    .frame(width: 120, alignment: .leading)
+                    .font(.caption)
+                    .frame(width: 80, alignment: .leading)
+                Spacer()
                 TextField("Top-K", text: $topKText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 100)
+                    .frame(width: 80)
                     .keyboardType(.numberPad)
                     .focused($focusedField, equals: .topK)
                     .onAppear {
@@ -1756,12 +2459,13 @@ struct SettingsView: View {
                 HStack {
                     Text("Top-P")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.builtInTopPValue, in: 0...1, step: 0.01)
                     Text(String(format: "%.2f", cloud.builtInTopPValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.builtInTopPValue, in: 0...1, step: 0.01)
             }
             
             // Reset to Defaults Button
@@ -1781,8 +2485,9 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("System Prompt (optional)")
                     .bold()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                TextField("Leave empty to use LM Studio's default", text: $cloud.lmstudioSystemPrompt, axis: .vertical)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                TextField("System Prompt", text: $cloud.lmstudioSystemPrompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...10)
                     .focused($focusedField, equals: .lmstudioSystemPrompt)
@@ -1791,15 +2496,23 @@ struct SettingsView: View {
             
             // Max Tokens
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Max Tokens", isOn: $cloud.lmstudioMaxTokensEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Max Tokens")
+                        .font(.caption)
+                    Toggle("", isOn: $cloud.lmstudioMaxTokensEnabled)
+                        .labelsHidden()
+                }
                 if cloud.lmstudioMaxTokensEnabled {
                     HStack {
                         Text("Max Tokens")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Spacer()
                         TextField("Max tokens", text: $lmstudioMaxTokensText)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
+                            .frame(width: 80)
                             .keyboardType(.numberPad)
                             .focused($focusedField, equals: .lmstudioMaxTokens)
                             .onAppear {
@@ -1816,33 +2529,47 @@ struct SettingsView: View {
             
             // Temperature
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Temperature", isOn: $cloud.lmstudioTemperatureEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Temperature")
+                        .font(.caption)
+                Toggle("", isOn: $cloud.lmstudioTemperatureEnabled)
+                        .labelsHidden()
+                }
                 if cloud.lmstudioTemperatureEnabled {
                     HStack {
                         Text("Temperature")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Slider(value: $cloud.lmstudioTemperatureValue, in: 0...2, step: 0.05)
                         Text(String(format: "%.2f", cloud.lmstudioTemperatureValue))
-                            .frame(width: 50, alignment: .trailing)
+                            .frame(width: 35, alignment: .trailing)
                             .foregroundColor(.secondary)
                     }
-                    Slider(value: $cloud.lmstudioTemperatureValue, in: 0...2, step: 0.05)
                 }
             }
             
             // Top-P
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Top-P", isOn: $cloud.lmstudioTopPEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Top-P")
+                        .font(.caption)
+                Toggle("", isOn: $cloud.lmstudioTopPEnabled)
+                        .labelsHidden()
+                }
                 if cloud.lmstudioTopPEnabled {
                     HStack {
                         Text("Top-P")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Slider(value: $cloud.lmstudioTopPValue, in: 0...1, step: 0.01)
                         Text(String(format: "%.2f", cloud.lmstudioTopPValue))
-                            .frame(width: 50, alignment: .trailing)
+                            .frame(width: 35, alignment: .trailing)
                             .foregroundColor(.secondary)
                     }
-                    Slider(value: $cloud.lmstudioTopPValue, in: 0...1, step: 0.01)
                 }
             }
             
@@ -1855,8 +2582,9 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("System Prompt (optional)")
                     .bold()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                TextField("Leave empty to use Ollama's default", text: $cloud.ollamaSystemPrompt, axis: .vertical)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                TextField("System Prompt", text: $cloud.ollamaSystemPrompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...10)
                     .focused($focusedField, equals: .ollamaSystemPrompt)
@@ -1865,15 +2593,23 @@ struct SettingsView: View {
             
             // Max Tokens
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Max Tokens", isOn: $cloud.ollamaMaxTokensEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Max Tokens")
+                        .font(.caption)
+                Toggle("", isOn: $cloud.ollamaMaxTokensEnabled)
+                        .labelsHidden()
+                }
                 if cloud.ollamaMaxTokensEnabled {
                     HStack {
                         Text("Max Tokens")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Spacer()
                         TextField("Max tokens", text: $ollamaMaxTokensText)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
+                            .frame(width: 80)
                             .keyboardType(.numberPad)
                             .focused($focusedField, equals: .ollamaMaxTokens)
                             .onAppear {
@@ -1890,33 +2626,47 @@ struct SettingsView: View {
             
             // Temperature
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Temperature", isOn: $cloud.ollamaTemperatureEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Temperature")
+                        .font(.caption)
+                Toggle("", isOn: $cloud.ollamaTemperatureEnabled)
+                        .labelsHidden()
+                }
                 if cloud.ollamaTemperatureEnabled {
                     HStack {
                         Text("Temperature")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Slider(value: $cloud.ollamaTemperatureValue, in: 0...2, step: 0.05)
                         Text(String(format: "%.2f", cloud.ollamaTemperatureValue))
-                            .frame(width: 50, alignment: .trailing)
+                            .frame(width: 35, alignment: .trailing)
                             .foregroundColor(.secondary)
                     }
-                    Slider(value: $cloud.ollamaTemperatureValue, in: 0...2, step: 0.05)
                 }
             }
             
             // Top-P
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Override Top-P", isOn: $cloud.ollamaTopPEnabled)
+                HStack {
+                    Spacer()
+                    Text("Override Top-P")
+                        .font(.caption)
+                Toggle("", isOn: $cloud.ollamaTopPEnabled)
+                        .labelsHidden()
+                }
                 if cloud.ollamaTopPEnabled {
                     HStack {
                         Text("Top-P")
                             .bold()
-                            .frame(width: 120, alignment: .leading)
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Slider(value: $cloud.ollamaTopPValue, in: 0...1, step: 0.01)
                         Text(String(format: "%.2f", cloud.ollamaTopPValue))
-                            .frame(width: 50, alignment: .trailing)
+                            .frame(width: 35, alignment: .trailing)
                             .foregroundColor(.secondary)
                     }
-                    Slider(value: $cloud.ollamaTopPValue, in: 0...1, step: 0.01)
                 }
             }
             
@@ -1932,8 +2682,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Thinking System Prompt (optional)")
                 .bold()
-                .frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Leave empty to use LM Studio's default", text: $cloud.lmstudioThinkingSystemPrompt, axis: .vertical)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .center)
+            TextField("System Prompt for Thinking mode", text: $cloud.lmstudioThinkingSystemPrompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...10)
                 .focused($focusedField, equals: .lmstudioThinkingSystemPrompt)
@@ -1942,15 +2693,23 @@ struct SettingsView: View {
         
         // Max Tokens
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Max Tokens", isOn: $cloud.lmstudioThinkingMaxTokensEnabled)
+            HStack {
+                Spacer()
+                Text("Override Max Tokens")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.lmstudioThinkingMaxTokensEnabled)
+                    .labelsHidden()
+            }
             if cloud.lmstudioThinkingMaxTokensEnabled {
                 HStack {
                     Text("Max Tokens")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Spacer()
                     TextField("Max tokens", text: $lmstudioThinkingMaxTokensText)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
+                        .frame(width: 80)
                         .keyboardType(.numberPad)
                         .focused($focusedField, equals: .lmstudioThinkingMaxTokens)
                         .onAppear {
@@ -1967,33 +2726,47 @@ struct SettingsView: View {
         
         // Temperature
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Temperature", isOn: $cloud.lmstudioThinkingTemperatureEnabled)
+            HStack {
+                Spacer()
+                Text("Override Temperature")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.lmstudioThinkingTemperatureEnabled)
+                    .labelsHidden()
+            }
             if cloud.lmstudioThinkingTemperatureEnabled {
                 HStack {
                     Text("Temperature")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.lmstudioThinkingTemperatureValue, in: 0...2, step: 0.05)
                     Text(String(format: "%.2f", cloud.lmstudioThinkingTemperatureValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.lmstudioThinkingTemperatureValue, in: 0...2, step: 0.05)
             }
         }
         
         // Top-P
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Top-P", isOn: $cloud.lmstudioThinkingTopPEnabled)
+            HStack {
+                Spacer()
+                Text("Override Top-P")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.lmstudioThinkingTopPEnabled)
+                    .labelsHidden()
+            }
             if cloud.lmstudioThinkingTopPEnabled {
                 HStack {
                     Text("Top-P")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.lmstudioThinkingTopPValue, in: 0...1, step: 0.01)
                     Text(String(format: "%.2f", cloud.lmstudioThinkingTopPValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.lmstudioThinkingTopPValue, in: 0...1, step: 0.01)
             }
         }
         
@@ -2008,8 +2781,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Thinking System Prompt (optional)")
                 .bold()
-                .frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Leave empty to use Ollama's default", text: $cloud.ollamaThinkingSystemPrompt, axis: .vertical)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .center)
+            TextField("System Prompt for Thinking mode", text: $cloud.ollamaThinkingSystemPrompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...10)
                 .focused($focusedField, equals: .ollamaThinkingSystemPrompt)
@@ -2018,15 +2792,23 @@ struct SettingsView: View {
         
         // Max Tokens
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Max Tokens", isOn: $cloud.ollamaThinkingMaxTokensEnabled)
+            HStack {
+                Spacer()
+                Text("Override Max Tokens")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.ollamaThinkingMaxTokensEnabled)
+                    .labelsHidden()
+            }
             if cloud.ollamaThinkingMaxTokensEnabled {
                 HStack {
                     Text("Max Tokens")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Spacer()
                     TextField("Max tokens", text: $ollamaThinkingMaxTokensText)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
+                        .frame(width: 80)
                         .keyboardType(.numberPad)
                         .focused($focusedField, equals: .ollamaThinkingMaxTokens)
                         .onAppear {
@@ -2043,33 +2825,47 @@ struct SettingsView: View {
         
         // Temperature
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Temperature", isOn: $cloud.ollamaThinkingTemperatureEnabled)
+            HStack {
+                Spacer()
+                Text("Override Temperature")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.ollamaThinkingTemperatureEnabled)
+                labelsHidden()
+          }
             if cloud.ollamaThinkingTemperatureEnabled {
                 HStack {
                     Text("Temperature")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.ollamaThinkingTemperatureValue, in: 0...2, step: 0.05)
                     Text(String(format: "%.2f", cloud.ollamaThinkingTemperatureValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.ollamaThinkingTemperatureValue, in: 0...2, step: 0.05)
             }
         }
         
         // Top-P
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Override Top-P", isOn: $cloud.ollamaThinkingTopPEnabled)
+            HStack {
+                Spacer()
+                Text("Override Top-P")
+                    .font(.caption)
+            Toggle("", isOn: $cloud.ollamaThinkingTopPEnabled)
+                labelsHidden()
+          }
             if cloud.ollamaThinkingTopPEnabled {
                 HStack {
                     Text("Top-P")
                         .bold()
-                        .frame(width: 120, alignment: .leading)
+                        .font(.caption)
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $cloud.ollamaThinkingTopPValue, in: 0...1, step: 0.01)
                     Text(String(format: "%.2f", cloud.ollamaThinkingTopPValue))
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: 35, alignment: .trailing)
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $cloud.ollamaThinkingTopPValue, in: 0...1, step: 0.01)
             }
         }
         
@@ -3323,6 +4119,7 @@ struct MessageInput: View {
     @State private var showAttachmentOptions = false // NEW
     @State private var showImagePicker = false // NEW
     @State private var showDocumentPicker = false // NEW
+    @State private var showWebScrapingSheet = false
     var send: () -> Void
 
     var body: some View {
@@ -3393,6 +4190,17 @@ struct MessageInput: View {
                             .resizable()
                             .scaledToFit()
                             .frame(width: 27, height: 27)
+                            // quick tap = toggle on/off
+                            .onTapGesture {
+                                cloud.enableWebSearch.toggle()
+                            }
+                            // long press = open quick-adjust sheet (does **not** toggle)
+                            .onLongPressGesture(minimumDuration: 0.45) {
+                                showWebScrapingSheet = true
+                            }
+                            .accessibilityLabel(cloud.enableWebSearch
+                                                ? "Web-search enabled"
+                                                : "Web-search disabled")
                     }
                     
                     // Thinking toggle button (only show if thinking is available)
@@ -3606,6 +4414,10 @@ struct MessageInput: View {
                     if newValue {
                         transcriber.latestTranscript = nil
                     }
+                }
+                .sheet(isPresented: $showWebScrapingSheet) {
+                    WebScrapingQuickAdjust(isPresented: $showWebScrapingSheet)
+                        .environmentObject(cloud)          // pass the manager down
                 }
             }
             
@@ -3914,6 +4726,52 @@ struct ConversationRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+struct WebScrapingQuickAdjust: View {
+    /// `isPresented` is driven by MessageInput
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var cloud: CloudKitManager
+    
+    var body: some View {
+        VStack(spacing: 18) {
+            Capsule()                                       // the little grab bar
+                .fill(.secondary.opacity(0.4))
+                .frame(width: 36, height: 4)
+                .padding(.top, 8)
+            
+            Text("Web Search Token Budget")
+                .font(.headline)
+            
+            Text("≈ \(cloud.webScrapingTokenBudget) tokens")
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            Text("≈ \(cloud.webScrapingMaxChars) chars / chunk")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            
+            /// *Same binding as the slider in SettingsView*
+            Slider(
+                value: Binding(
+                    get: { Double(cloud.webScrapingTokenBudget) },
+                    set: { cloud.webScrapingTokenBudget = Int($0) }
+                ),
+                in: 2_000...16_000,
+                step: 100
+            )
+            .tint(.black)
+            .padding(.horizontal)
+            
+            Button("Done") { isPresented = false }
+                .buttonStyle(.borderedProminent)
+                .tint(.black)
+                .padding(.bottom, 4)
+        }
+        .padding(.horizontal)
+        .presentationDetents([.fraction(0.33)])
+        .presentationDragIndicator(.hidden)
     }
 }
 
